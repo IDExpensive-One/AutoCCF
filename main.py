@@ -114,6 +114,18 @@ class MainMenu:
             user_dir = self.config.get_user_dir(username)
             user_dir.mkdir(parents=True, exist_ok=True)
             
+            # 检查是否已有数据，询问是否增量更新
+            posts_file = user_dir / "posts.json"
+            incremental = False
+            
+            if posts_file.exists():
+                choice = input(
+                    f"{Colors.YELLOW}? 检测到已有数据，是否只获取新发言？[Y/n]: {Colors.RESET}"
+                ).strip().lower()
+                incremental = choice != "n"
+                if incremental:
+                    self.cli.info("将使用增量模式，只获取新发言")
+            
             # 导入并运行 APoU
             from APoU import UserPostsCrawler
             from APoU.config import CrawlerConfig
@@ -123,10 +135,12 @@ class MainMenu:
                 max_retries=self.config.apou.max_retries,
             )
             
+            mode_text = "增量更新" if incremental else "完整获取"
             self.cli.print_config([
                 ("目标用户", username),
                 ("输出目录", str(user_dir)),
                 ("页间延迟", f"{self.config.apou.page_delay} 秒"),
+                ("模式", mode_text),
             ])
             
             print()
@@ -140,6 +154,7 @@ class MainMenu:
                     save_raw=self.config.apou.save_raw,
                     save_incremental=True,
                     output_dir=str(user_dir),
+                    incremental=incremental,
                 )
                 
                 elapsed = time.time() - start_time
@@ -257,7 +272,8 @@ class MainMenu:
                 cli=self.cli,
             )
             
-            runner.load_tasks()
+            # 默认启用增量模式（跳过已存档的帖子）
+            runner.load_tasks(incremental=True)
             runner.run()
             
         except Exception as e:

@@ -181,12 +181,14 @@ class TaskManager:
             success = sum(1 for t in self.tasks if t.status == TaskStatus.SUCCESS)
             failed = sum(1 for t in self.tasks if t.status == TaskStatus.FAILED)
             pending = sum(1 for t in self.tasks if t.status == TaskStatus.PENDING)
+            skipped = sum(1 for t in self.tasks if t.status == TaskStatus.SKIPPED)
 
             return {
                 "total": total,
                 "success": success,
                 "failed": failed,
                 "pending": pending,
+                "skipped": skipped,
             }
 
     def save_progress(self) -> None:
@@ -233,6 +235,30 @@ class TaskManager:
 
         except Exception:
             return False
+    
+    def skip_existing_threads(self) -> int:
+        """
+        跳过已经存档的帖子（threads/tid 目录已存在）
+        
+        Returns:
+            跳过的任务数
+        """
+        skipped = 0
+        threads_dir = os.path.join(self.user_output_dir, "threads")
+        
+        for task in self.tasks:
+            if task.status != TaskStatus.PENDING:
+                continue
+                
+            thread_dir = os.path.join(threads_dir, str(task.tid))
+            # 检查是否有 thread.json（表示已成功爬取）
+            thread_file = os.path.join(thread_dir, "thread.json")
+            
+            if os.path.exists(thread_file):
+                task.status = TaskStatus.SKIPPED
+                skipped += 1
+        
+        return skipped
 
     def save_index(self) -> str:
         """
@@ -386,8 +412,13 @@ class DoPJRunner:
         self.start_time: float = 0.0
         self._lock = threading.Lock()
 
-    def load_tasks(self) -> None:
-        """加载任务"""
+    def load_tasks(self, incremental: bool = True) -> None:
+        """
+        加载任务
+        
+        Args:
+            incremental: 是否启用增量模式（跳过已存档的帖子）
+        """
         self.task_manager.load_from_json(self.input_json, self.output_dir)
         
         # 更新 progress_file 路径到用户目录
@@ -408,6 +439,12 @@ class DoPJRunner:
         if self.task_manager.load_progress():
             if self.cli:
                 self.cli.info("检测到上次未完成的任务，将继续执行")
+        
+        # 增量模式：跳过已存档的帖子
+        if incremental:
+            skipped = self.task_manager.skip_existing_threads()
+            if skipped > 0 and self.cli:
+                self.cli.info(f"增量模式: 跳过 {skipped} 个已存档的帖子")
 
         self._print_account_status()
 
@@ -536,13 +573,24 @@ class DoPJRunner:
         if self.cli:
             self.cli.print_section("爬取完成")
 
-            self.cli.print_stats_box([
+            stats_items = [
                 ("总任务数", str(stats["total"]), "white"),
                 ("成功", str(stats["success"]), "green"),
                 ("失败", str(stats["failed"]), "red" if stats["failed"] > 0 else "gray"),
+            ]
+            
+            # 如果有跳过的任务，显示跳过数量
+            if stats.get("skipped", 0) > 0:
+                stats_items.append(
+                    ("已跳过", str(stats["skipped"]), "yellow")
+                )
+            
+            stats_items.extend([
                 ("总耗时", self.cli.format_duration(elapsed), "yellow"),
                 ("输出目录", self.task_manager.user_output_dir, "cyan"),
             ])
+            
+            self.cli.print_stats_box(stats_items)
 
             print()
             print(f"  {Colors.GRAY}账户状态:{Colors.RESET}")

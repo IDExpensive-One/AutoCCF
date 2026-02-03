@@ -81,6 +81,7 @@ class UserPostsCrawler:
         save_raw: bool = True,
         save_incremental: bool = True,
         output_dir: Optional[str] = None,
+        incremental: bool = False,
     ) -> List[Post]:
         """
         爬取指定用户的所有发言
@@ -91,6 +92,7 @@ class UserPostsCrawler:
             save_raw: 是否保存原始数据
             save_incremental: 是否增量保存（每页保存一次）
             output_dir: 输出目录（默认当前目录）
+            incremental: 是否增量更新（只获取新发言，遇到已有的就停止）
 
         Returns:
             所有爬取到的帖子列表
@@ -113,6 +115,33 @@ class UserPostsCrawler:
             self._storage = Storage(os.path.join(output_dir, "raw_data"))
         else:
             output_file = self._storage.get_output_filename(username)
+
+        # 增量更新：加载已有数据
+        existing_posts: List[Post] = []
+        existing_tids: set = set()
+        
+        if incremental:
+            existing_data = self._storage.load_posts(output_file)
+            if existing_data:
+                # 提取已有的 tid
+                for post_dict in existing_data:
+                    tid = self._extract_tid_from_href(post_dict.get("href", ""))
+                    if tid:
+                        existing_tids.add(tid)
+                    # 重建 Post 对象
+                    existing_posts.append(Post(
+                        id=post_dict.get("id", 0),
+                        title=post_dict.get("title", ""),
+                        content=post_dict.get("content", ""),
+                        href=post_dict.get("href", ""),
+                        forum=post_dict.get("forum", ""),
+                    ))
+                self._print(f"增量模式: 已有 {len(existing_posts)} 条发言", "info")
+            else:
+                self._print("增量模式: 无历史数据，将获取全部", "info")
+        
+        new_posts_count = 0
+        reached_existing = False
 
         try:
             while self._is_running:
@@ -138,6 +167,26 @@ class UserPostsCrawler:
                 page_posts = self._parser.parse_response(
                     data, page, start_id=len(self._posts)
                 )
+                
+                # 增量模式：检查是否遇到已有帖子
+                if incremental and existing_tids:
+                    new_page_posts = []
+                    for post in page_posts:
+                        tid = self._extract_tid_from_href(post.href)
+                        if tid and tid in existing_tids:
+                            # 遇到已有帖子，停止
+                            reached_existing = True
+                            self._print(
+                                f"遇到已有帖子 (tid={tid})，停止获取", 
+                                "info"
+                            )
+                            break
+                        new_page_posts.append(post)
+                        new_posts_count += 1
+                    page_posts = new_page_posts
+                else:
+                    new_posts_count += len(page_posts)
+                
                 self._posts.extend(page_posts)
 
                 # 打印进度
@@ -147,11 +196,19 @@ class UserPostsCrawler:
                 if self.on_page_complete:
                     self.on_page_complete(page, len(page_posts))
 
-                # 增量保存
+                # 增量保存（合并新旧数据）
                 if save_incremental:
-                    self._storage.save_posts(self._posts, output_file)
+                    merged = self._merge_posts(self._posts, existing_posts)
+                    self._storage.save_posts(merged, output_file)
 
                 # 检查是否结束
+                if reached_existing:
+                    self._print(
+                        f"增量更新完成: 新增 {new_posts_count} 条发言", 
+                        "success"
+                    )
+                    break
+                    
                 if not self._parser.has_more_data(data):
                     self._print("已获取所有数据", "success")
                     break
@@ -164,13 +221,59 @@ class UserPostsCrawler:
             raise
         finally:
             self._is_running = False
-            # 最终保存
-            self._storage.save_posts(self._posts, output_file)
+            # 最终保存（合并新旧数据）
+            merged = self._merge_posts(self._posts, existing_posts)
+            self._storage.save_posts(merged, output_file)
 
-        self._print(f"共获取到 {len(self._posts)} 条发言", "success")
+        self._print(f"共获取到 {len(self._posts)} 条新发言", "success")
+        if existing_posts:
+            self._print(f"合并后总计: {len(merged)} 条发言", "info")
         self._print(f"数据已保存到: {output_file}", "info")
 
-        return self._posts
+        return merged if incremental else self._posts
+    
+    def _extract_tid_from_href(self, href: str) -> Optional[int]:
+        """
+        从帖子链接中提取 tid
+        
+        Args:
+            href: 帖子链接，如 https://tieba.baidu.com/p/5052759887?pid=xxx
+            
+        Returns:
+            tid 或 None
+        """
+        import re
+        match = re.search(r"/p/(\d+)", href)
+        if match:
+            return int(match.group(1))
+        return None
+    
+    def _merge_posts(
+        self, 
+        new_posts: List[Post], 
+        existing_posts: List[Post]
+    ) -> List[Post]:
+        """
+        合并新旧帖子列表
+        
+        新帖子在前，旧帖子在后，按时间倒序排列。
+        重新编号 id。
+        
+        Args:
+            new_posts: 新获取的帖子
+            existing_posts: 已有的帖子
+            
+        Returns:
+            合并后的帖子列表
+        """
+        # 新帖子 + 旧帖子（新的在前）
+        merged = list(new_posts) + list(existing_posts)
+        
+        # 重新编号
+        for i, post in enumerate(merged):
+            post.id = i + 1
+            
+        return merged
 
     def _fetch_page_with_empty_retry(
         self,

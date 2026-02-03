@@ -81,6 +81,7 @@ class TestTaskManager:
             "success": 0,
             "failed": 0,
             "pending": 0,
+            "skipped": 0,
         }
 
     def test_get_stats_with_tasks(self):
@@ -97,13 +98,17 @@ class TestTaskManager:
         task3 = Task(3, 300, "Task 3", "out")
         task3.status = TaskStatus.PENDING
         
-        tm.tasks = [task1, task2, task3]
+        task4 = Task(4, 400, "Task 4", "out")
+        task4.status = TaskStatus.SKIPPED
+        
+        tm.tasks = [task1, task2, task3, task4]
         
         stats = tm.get_stats()
-        assert stats["total"] == 3
+        assert stats["total"] == 4
         assert stats["success"] == 1
         assert stats["failed"] == 1
         assert stats["pending"] == 1
+        assert stats["skipped"] == 1
 
     def test_load_from_json(self, tmp_path):
         """Test loading tasks from JSON file"""
