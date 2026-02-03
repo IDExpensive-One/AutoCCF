@@ -1,0 +1,34 @@
+# AutoCCF - 百度贴吧爬虫工具集依赖
+# Python 版本要求：>= 3.10
+
+# === 核心依赖 ===
+# APoU 模块 (同步 HTTP)
+requests>=2.31.0
+
+# DoPJ 模块 (异步爬取)
+aiotieba>=4.4.9
+aiohttp>=3.9.5
+aiofiles>=24.1.0
+orjson>=3.10.3
+
+# === 可选依赖 ===
+# 交互式 CLI（可选，用于高级配置）
+# questionary>=2.0.1
+
+# 数据处理（可选）
+# pandas>=2.0.0
+# numpy>=1.24.0
+
+# === 开发工具（可选）===
+# pytest>=7.4.0
+# black>=23.0.0
+# flake8>=6.0.0
+
+# === 安装说明 ===
+# 使用镜像源安装（推荐）：
+# pip install -r requirements.txt -i https://mirrors.aliyun.com/pypi/simple/
+#
+# 或使用清华源：
+# pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple/
+#
+# Windows 用户可能需要额外安装 Visual C++ 14.0+

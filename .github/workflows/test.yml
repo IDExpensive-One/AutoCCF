@@ -1,0 +1,75 @@
+name: Tests
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python-version: ['3.10', '3.11', '3.12']
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ matrix.python-version }}
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+
+    - name: Lint with flake8
+      run: |
+        pip install flake8
+        # stop the build if there are Python syntax errors or undefined names
+        flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
+        # exit-zero treats all errors as warnings
+        flake8 . --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
+      continue-on-error: true
+
+    - name: Test URL Parser
+      run: |
+        cd DoPJ
+        python -c "from utils.url_parser import parse_tieba_url; result = parse_tieba_url('https://tieba.baidu.com/p/123?pid=456'); assert result == (123, 456), f'Expected (123, 456), got {result}'"
+
+    - name: Test Account Manager
+      run: |
+        cd DoPJ
+        python -c "from cli import AccountManager; am = AccountManager([{'name': 'test', 'bduss': 'test123'}]); acc = am.get_account(); assert acc.name == 'test'"
+
+    - name: Test Task Manager
+      run: |
+        cd DoPJ
+        python -c "from cli import TaskManager, TaskStatus; tm = TaskManager(); assert tm.get_stats()['total'] == 0"
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install black isort
+
+    - name: Check formatting with black
+      run: |
+        black --check *.py DoPJ/ || true
+
+    - name: Check imports with isort
+      run: |
+        isort --check-only *.py DoPJ/ || true

@@ -1,0 +1,24 @@
+{
+  "database_dir": "./database",
+  "accounts": [
+    {
+      "name": "账户1",
+      "bduss": "你的BDUSS_1_这里填入192个字符的BDUSS字符串"
+    },
+    {
+      "name": "账户2",
+      "bduss": "你的BDUSS_2_这里填入192个字符的BDUSS字符串"
+    }
+  ],
+  "apou": {
+    "page_delay": 2.0,
+    "max_retries": 3,
+    "save_raw": true
+  },
+  "dopj": {
+    "threads": 3,
+    "max_retries": 3,
+    "min_interval": 2.0,
+    "max_fails": 5
+  }
+}

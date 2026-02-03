@@ -1,0 +1,18 @@
+{
+  "accounts": [
+    {
+      "name": "账户1",
+      "bduss": "你的BDUSS_1_这里填入192个字符的BDUSS字符串"
+    },
+    {
+      "name": "账户2",
+      "bduss": "你的BDUSS_2_这里填入192个字符的BDUSS字符串"
+    },
+    {
+      "name": "账户3",
+      "bduss": "你的BDUSS_3_这里填入192个字符的BDUSS字符串"
+    }
+  ],
+  "min_interval": 2.0,
+  "max_fails": 5
+}

@@ -1,0 +1,100 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual Environment
+venv/
+ENV/
+env/
+.venv
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# 敏感配置文件
+DoPJ/config/config.json
+**/tieba_auth.json
+**/*_auth.json
+
+# BDUSS 文件
+**/bduss.txt
+**/*.bduss
+
+# 临时文件和缓存
+*.log
+*.tmp
+.cache/
+tmp/
+temp/
+
+# 输出数据
+raw_data/
+*_posts.json
+!example/test\ post/*.json
+
+# DoPJ 输出
+DoPJ/posts/
+DoPJ/test_output/
+DoPJ/test_single_output/
+DoPJ/test_voice_output/
+DoPJ/full_output/
+DoPJ/output/
+DoPJ/progress.json
+DoPJ/test_small.json
+DoPJ/test_voice.json
+DoPJ/团子传说_posts_fixed.json
+
+# 统一架构输出
+database/
+config.json
+posts/
+
+# 测试文件
+DoPJ/test_*.py
+
+# TiebaArchiver 输出
+scraped_data/
+**/content.db
+**/scrape.*.log
+
+# 媒体文件（如果太大）
+**/post_assets/
+**/user_avatar/
+**/forum_avatar/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# 操作系统
+Thumbs.db
+.DS_Store
+
+# 其他
+*.bak
+*.orig

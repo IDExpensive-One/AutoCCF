@@ -1,0 +1,13 @@
+# DoPJ 依赖
+# 这些依赖来自 TiebaArchiver，需要先安装
+
+# 从 TiebaArchiver 安装依赖
+# cd ../example/TiebaArchiver-1.3.1
+# pip install -r requirements.txt
+
+# 或者直接安装以下依赖：
+aiotieba>=4.4.9
+orjson>=3.10.3
+aiohttp>=3.9.5
+aiofiles>=24.1.0
+questionary>=2.0.1

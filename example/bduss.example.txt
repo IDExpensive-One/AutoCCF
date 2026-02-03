@@ -1,0 +1,12 @@
+# BDUSS 示例文件
+# 每行一个 BDUSS，格式：名称:BDUSS值
+# 
+# 获取 BDUSS 的方法：
+# 1. 登录百度贴吧网页版
+# 2. 打开浏览器开发者工具 (F12)
+# 3. 在 Application -> Cookies 中找到 BDUSS
+# 4. 复制 BDUSS 的值
+#
+# 示例（请替换为真实的 BDUSS）：
+账户1:xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+账户2:yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy
