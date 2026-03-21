@@ -3,7 +3,6 @@ APoU Parser Tests
 
 Tests for PostParser and Post from APoU/parser.py
 """
-import pytest
 from APoU.parser import PostParser, Post
 
 
@@ -14,13 +13,17 @@ class TestPost:
         """Test creating a Post"""
         post = Post(
             id=1,
+            tid=100,
+            pid=200,
             title="Test Title",
             content="Test Content",
-            href="/p/123456",
             forum="testbar",
+            href="/p/123456",
         )
         
         assert post.id == 1
+        assert post.tid == 100
+        assert post.pid == 200
         assert post.title == "Test Title"
         assert post.content == "Test Content"
         assert post.href == "/p/123456"
@@ -30,158 +33,111 @@ class TestPost:
         """Test Post.to_dict() method"""
         post = Post(
             id=1,
+            tid=100,
+            pid=200,
             title="Title",
             content="Content",
-            href="/p/999",
             forum="bar",
+            href="/p/999",
         )
         
         d = post.to_dict()
         
         assert isinstance(d, dict)
         assert d["id"] == 1
+        assert d["tid"] == 100
+        assert d["pid"] == 200
         assert d["title"] == "Title"
         assert d["content"] == "Content"
         assert d["href"] == "/p/999"
         assert d["forum"] == "bar"
 
+    def test_post_build_href(self):
+        """Test Post.build_href() method"""
+        assert Post.build_href(123) == "https://tieba.baidu.com/p/123"
+        assert Post.build_href(123, 456) == "https://tieba.baidu.com/p/123?pid=456"
+
 
 class TestPostParser:
     """Test PostParser class"""
 
-    def test_page_size_constant(self):
-        """Test PAGE_SIZE constant"""
-        assert PostParser.PAGE_SIZE == 20
-
-    def test_parse_response_basic(self):
-        """Test parsing basic response"""
-        parser = PostParser()
+    def test_from_dict_basic(self):
+        """Test PostParser.from_dict() with full data"""
         data = {
-            "posts": [
-                {"title": "Post 1", "content": "Content 1", "href": "/p/111"},
-                {"title": "Post 2", "content": "Content 2", "href": "/p/222"},
-            ]
+            "id": 1,
+            "tid": 123,
+            "pid": 456,
+            "title": "Post Title",
+            "content": "Post Content",
+            "forum": "testbar",
+            "href": "https://tieba.baidu.com/p/123?pid=456",
+            "fid": 789,
+            "create_time": 1700000000,
+            "is_comment": True,
+            "is_thread": False,
         }
-        
-        posts = parser.parse_response(data, page=1)
-        
-        assert len(posts) == 2
-        assert posts[0].id == 1
-        assert posts[0].title == "Post 1"
-        assert posts[1].id == 2
-        assert posts[1].title == "Post 2"
 
-    def test_parse_response_with_start_id(self):
-        """Test parsing with custom start_id"""
-        parser = PostParser()
+        post = PostParser.from_dict(data)
+
+        assert post.id == 1
+        assert post.tid == 123
+        assert post.pid == 456
+        assert post.title == "Post Title"
+        assert post.content == "Post Content"
+        assert post.forum == "testbar"
+        assert post.href == "https://tieba.baidu.com/p/123?pid=456"
+        assert post.fid == 789
+        assert post.create_time == 1700000000
+        assert post.is_comment is True
+        assert post.is_thread is False
+
+    def test_from_dict_with_post_id(self):
+        """Test post_id overrides dict id"""
         data = {
-            "posts": [
-                {"title": "Post A", "content": "", "href": "/p/100"},
-            ]
+            "id": 1,
+            "tid": 123,
+            "pid": 456,
+            "title": "Post Title",
+            "content": "Post Content",
+            "forum": "testbar",
+            "href": "https://tieba.baidu.com/p/123?pid=456",
         }
-        
-        posts = parser.parse_response(data, page=2, start_id=20)
-        
-        assert posts[0].id == 21  # start_id + 1
 
-    def test_parse_response_empty_posts(self):
-        """Test parsing response with empty posts"""
-        parser = PostParser()
-        data = {"posts": []}
-        
-        posts = parser.parse_response(data, page=1)
-        
-        assert posts == []
+        post = PostParser.from_dict(data, post_id=99)
 
-    def test_parse_response_missing_posts_key(self):
-        """Test parsing response without posts key"""
-        parser = PostParser()
-        data = {"other": "data"}
-        
-        posts = parser.parse_response(data, page=1)
-        
-        assert posts == []
+        assert post.id == 99
+        assert post.tid == 123
+        assert post.pid == 456
 
-    def test_parse_response_invalid_data_type(self):
-        """Test parsing non-dict data"""
-        parser = PostParser()
-        
-        posts = parser.parse_response("invalid", page=1)
-        
-        assert posts == []
-
-    def test_parse_response_skips_invalid_posts(self):
-        """Test that invalid post entries are skipped"""
-        parser = PostParser()
+    def test_from_dict_minimal(self):
+        """Test PostParser.from_dict() with minimal data"""
         data = {
-            "posts": [
-                {"title": "Valid", "content": "", "href": "/p/1"},
-                "invalid_entry",
-                123,
-                {"title": "Also Valid", "content": "", "href": "/p/2"},
-            ]
+            "href": "https://tieba.baidu.com/p/123",
         }
-        
-        posts = parser.parse_response(data, page=1)
-        
-        assert len(posts) == 2
 
-    def test_extract_forum_name_returns_placeholder(self):
-        """Test that forum name returns placeholder"""
-        parser = PostParser()
-        
-        result = parser._extract_forum_name("/p/123")
-        
-        assert result == "贴吧"
+        post = PostParser.from_dict(data)
 
-    def test_extract_forum_name_empty_href(self):
-        """Test forum name extraction with empty href"""
-        parser = PostParser()
-        
-        result = parser._extract_forum_name("")
-        
-        assert result == ""
+        assert post.id == 0
+        assert post.tid == 123
+        assert post.pid == 0
+        assert post.title == ""
+        assert post.content == ""
+        assert post.forum == ""
+        assert post.href == "https://tieba.baidu.com/p/123"
+        assert post.fid == 0
+        assert post.create_time == 0
+        assert post.is_comment is False
+        assert post.is_thread is False
 
-    def test_has_more_data_true(self):
-        """Test has_more_data returns True when posts exist"""
-        parser = PostParser()
+    def test_from_dict_legacy_href(self):
+        """Test legacy href parsing for tid and pid"""
         data = {
-            "posts": [{"title": "Test", "content": "", "href": "/p/1"}]
+            "tid": 0,
+            "pid": 0,
+            "href": "https://tieba.baidu.com/p/123?pid=456",
         }
-        
-        assert parser.has_more_data(data) is True
 
-    def test_has_more_data_false(self):
-        """Test has_more_data returns False when no posts"""
-        parser = PostParser()
-        
-        assert parser.has_more_data({"posts": []}) is False
-        assert parser.has_more_data({}) is False
+        post = PostParser.from_dict(data)
 
-    def test_get_posts_count(self):
-        """Test get_posts_count"""
-        parser = PostParser()
-        
-        data1 = {"posts": [1, 2, 3]}
-        data2 = {"posts": []}
-        data3 = {}
-        
-        assert parser.get_posts_count(data1) == 3
-        assert parser.get_posts_count(data2) == 0
-        assert parser.get_posts_count(data3) == 0
-
-    def test_parse_single_post_with_missing_fields(self):
-        """Test parsing post with missing optional fields"""
-        parser = PostParser()
-        data = {
-            "posts": [
-                {"href": "/p/123"}  # Missing title and content
-            ]
-        }
-        
-        posts = parser.parse_response(data, page=1)
-        
-        assert len(posts) == 1
-        assert posts[0].title == ""
-        assert posts[0].content == ""
-        assert posts[0].href == "/p/123"
+        assert post.tid == 123
+        assert post.pid == 456

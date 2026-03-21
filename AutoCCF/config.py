@@ -10,6 +10,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Any
 
+from AutoCCF.utils import is_valid_bduss
+
 
 # 配置文件位置（按优先级）
 CONFIG_SEARCH_PATHS = [
@@ -26,7 +28,13 @@ class APoUConfig:
     """APoU 模块配置"""
     page_delay: float = 2.0
     max_retries: int = 3
-    save_raw: bool = True
+
+    def __post_init__(self) -> None:
+        """验证配置参数"""
+        if not 0.5 <= self.page_delay <= 60:
+            raise ValueError(f"page_delay 必须在 0.5-60 之间，当前值: {self.page_delay}")
+        if not 1 <= self.max_retries <= 10:
+            raise ValueError(f"max_retries 必须在 1-10 之间，当前值: {self.max_retries}")
 
 
 @dataclass
@@ -36,6 +44,17 @@ class DoPJConfig:
     max_retries: int = 3
     min_interval: float = 2.0
     max_fails: int = 5
+
+    def __post_init__(self) -> None:
+        """验证配置参数"""
+        if not 1 <= self.threads <= 50:
+            raise ValueError(f"threads 必须在 1-50 之间，当前值: {self.threads}")
+        if not 1 <= self.max_retries <= 10:
+            raise ValueError(f"max_retries 必须在 1-10 之间，当前值: {self.max_retries}")
+        if not 0.5 <= self.min_interval <= 60:
+            raise ValueError(f"min_interval 必须在 0.5-60 之间，当前值: {self.min_interval}")
+        if not 1 <= self.max_fails <= 20:
+            raise ValueError(f"max_fails 必须在 1-20 之间，当前值: {self.max_fails}")
 
 
 @dataclass
@@ -55,7 +74,12 @@ class UnifiedConfig:
     
     # 内部使用
     _config_path: str = ""
-    
+
+    @property
+    def config_path(self) -> str:
+        """获取当前配置文件路径"""
+        return self._config_path or DEFAULT_CONFIG_PATH
+
     def to_dict(self) -> Dict[str, Any]:
         """转换为字典"""
         return {
@@ -67,7 +91,6 @@ class UnifiedConfig:
             "apou": {
                 "page_delay": self.apou.page_delay,
                 "max_retries": self.apou.max_retries,
-                "save_raw": self.apou.save_raw,
             },
             "dopj": {
                 "threads": self.dopj.threads,
@@ -89,7 +112,6 @@ class UnifiedConfig:
         apou = APoUConfig(
             page_delay=apou_data.get("page_delay", 2.0),
             max_retries=apou_data.get("max_retries", 3),
-            save_raw=apou_data.get("save_raw", True),
         )
         
         dopj_data = data.get("dopj", {})
@@ -140,10 +162,7 @@ class UnifiedConfig:
     
     def has_valid_accounts(self) -> bool:
         """检查是否有有效的账户配置"""
-        return any(
-            acc.bduss and len(acc.bduss) > 50 and not acc.bduss.startswith("你的")
-            for acc in self.accounts
-        )
+        return any(is_valid_bduss(acc.bduss) for acc in self.accounts)
 
 
 class ConfigManager:
@@ -210,7 +229,7 @@ class ConfigManager:
         
         # 2. 询问 BDUSS
         print()
-        print(f"  {Colors.GRAY}DoPJ 需要贴吧账户的 BDUSS 来获取帖子详情。{Colors.RESET}")
+        print(f"  {Colors.GRAY}APoU 和 DoPJ 都需要贴吧账户的 BDUSS 来获取数据。{Colors.RESET}")
         print(f"  {Colors.GRAY}获取方法: 浏览器 F12 → Application → Cookies → BDUSS{Colors.RESET}")
         print()
         
@@ -262,32 +281,40 @@ class ConfigManager:
             return self.setup_wizard()
     
     def list_users(self) -> List[Dict[str, Any]]:
-        """列出所有用户及其状态"""
+        """列出所有用户及其状态（兼容新旧路径）"""
         if not self.config:
             return []
-        
+
         users = []
         db_path = self.config.get_database_path()
-        
+
         if not db_path.exists():
             return []
-        
+
         for item in sorted(db_path.iterdir()):
             if not item.is_dir():
                 continue
-            
+
+            # 检测新旧路径
+            has_posts_new = (item / "apou" / "posts.json").exists()
+            has_posts_legacy = (item / "posts.json").exists()
+            has_index_new = (item / "dopj" / "index.json").exists()
+            has_index_legacy = (item / "index.json").exists()
+            has_threads_new = (item / "dopj").exists()
+            has_threads_legacy = (item / "threads").exists()
+
             user_info = {
                 "name": item.name,
                 "path": str(item),
-                "has_posts": (item / "posts.json").exists(),
-                "has_index": (item / "index.json").exists(),
-                "has_threads": (item / "threads").exists(),
+                "has_posts": has_posts_new or has_posts_legacy,
+                "has_index": has_index_new or has_index_legacy,
+                "has_threads": has_threads_new or has_threads_legacy,
                 "posts_count": 0,
                 "threads_count": 0,
             }
-            
-            # 读取帖子数量
-            posts_file = item / "posts.json"
+
+            # 读取帖子数量（优先新路径）
+            posts_file = (item / "apou" / "posts.json") if has_posts_new else (item / "posts.json")
             if posts_file.exists():
                 try:
                     with open(posts_file, "r", encoding="utf-8") as f:
@@ -295,9 +322,9 @@ class ConfigManager:
                     user_info["posts_count"] = len(posts) if isinstance(posts, list) else 0
                 except Exception:
                     pass
-            
-            # 读取索引信息
-            index_file = item / "index.json"
+
+            # 读取索引信息（优先新路径）
+            index_file = (item / "dopj" / "index.json") if has_index_new else (item / "index.json")
             if index_file.exists():
                 try:
                     with open(index_file, "r", encoding="utf-8") as f:
@@ -305,47 +332,62 @@ class ConfigManager:
                     user_info["threads_count"] = index.get("success_count", 0)
                 except Exception:
                     pass
-            
-            # 统计线程目录
-            threads_dir = item / "threads"
-            if threads_dir.exists():
+
+            # 统计帖子详情目录
+            dopj_dir = item / "dopj"
+            if dopj_dir.exists():
+                user_info["threads_count"] = sum(
+                    1 for d in dopj_dir.iterdir()
+                    if d.is_dir() and d.name.isdigit()
+                )
+            elif has_threads_legacy:
+                threads_dir = item / "threads"
                 user_info["threads_count"] = len(list(threads_dir.iterdir()))
-            
+
             users.append(user_info)
-        
+
         return users
     
     def find_apou_outputs(self) -> List[Dict[str, Any]]:
-        """查找所有 APoU 输出的 JSON 文件"""
+        """查找所有 APoU 输出的 JSON 文件（兼容新旧路径）"""
         if not self.config:
             return []
-        
+
         results = []
         db_path = self.config.get_database_path()
-        
+
         if not db_path.exists():
             return []
-        
-        # 在用户目录中查找 posts.json
+
         for user_dir in db_path.iterdir():
             if not user_dir.is_dir():
                 continue
-            
-            posts_file = user_dir / "posts.json"
-            if posts_file.exists():
-                try:
-                    with open(posts_file, "r", encoding="utf-8") as f:
-                        posts = json.load(f)
-                    
-                    results.append({
-                        "username": user_dir.name,
-                        "path": str(posts_file),
-                        "posts_count": len(posts) if isinstance(posts, list) else 0,
-                        "has_index": (user_dir / "index.json").exists(),
-                    })
-                except Exception:
-                    pass
-        
+
+            # 优先新路径，回退旧路径
+            posts_file = user_dir / "apou" / "posts.json"
+            if not posts_file.exists():
+                posts_file = user_dir / "posts.json"
+            if not posts_file.exists():
+                continue
+
+            try:
+                with open(posts_file, "r", encoding="utf-8") as f:
+                    posts = json.load(f)
+
+                has_index = (
+                    (user_dir / "dopj" / "index.json").exists()
+                    or (user_dir / "index.json").exists()
+                )
+
+                results.append({
+                    "username": user_dir.name,
+                    "path": str(posts_file),
+                    "posts_count": len(posts) if isinstance(posts, list) else 0,
+                    "has_index": has_index,
+                })
+            except Exception:
+                pass
+
         return results
 
 
@@ -357,6 +399,7 @@ def get_config() -> UnifiedConfig:
     """获取当前配置"""
     if config_manager.config is None:
         config_manager.load_or_setup()
+    assert config_manager.config is not None, "配置加载失败"
     return config_manager.config
 
 

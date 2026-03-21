@@ -8,7 +8,7 @@ import json
 import time
 import logging
 from pathlib import Path
-from typing import Optional, Any
+from typing import Optional, Any, Callable
 from urllib.parse import urlparse, parse_qs, quote
 
 # 添加父目录到路径以导入 autoccf
@@ -35,6 +35,7 @@ from AutoCCF.tieba.models import (
     ForumInfo,
     VoteInfo,
     VoteOption,
+    ScrapeRecord,
     ScrapeInfo,
     contents_to_json,
 )
@@ -123,8 +124,14 @@ class ContentProcessor:
             elif "FragVoice" in class_name:
                 return await self._process_voice(frag, pid, idx)
             else:
-                logger.warning(f"未知的片段类型: {class_name}")
-                return FragText(text=str(frag))
+                # FragUnknown 等未知类型，尝试提取文本
+                text = getattr(frag, "text", "") or str(frag)
+                if text and text != class_name:
+                    logger.debug(f"未知片段类型 {class_name}，提取文本: {text[:50]}")
+                else:
+                    logger.debug(f"未知片段类型 {class_name}，跳过")
+                    text = ""
+                return FragText(text=text)
 
         except Exception as e:
             logger.error(f"处理片段失败 [{class_name}]: {e}")
@@ -307,6 +314,8 @@ class ThreadScraper:
         output_dir: str | Path,
         download_media: bool = True,
         only_thread_author: bool = False,
+        on_log: Optional[Callable[[str, str], None]] = None,
+        stop_event: Optional[Any] = None,
     ):
         """
         初始化爬取器
@@ -316,14 +325,29 @@ class ThreadScraper:
             output_dir: 输出目录
             download_media: 是否下载媒体文件
             only_thread_author: 是否只爬取楼主回复
+            on_log: 日志回调 (message, level)
+            stop_event: 停止信号（threading.Event），被设置时中止爬取
         """
         self.bduss = bduss
         self.output_dir = Path(output_dir)
         self.download_media = download_media
         self.only_thread_author = only_thread_author
+        self._on_log = on_log
+        self._stop_event = stop_event
 
         self._client: Optional[TiebaClient] = None
         self._downloader: Optional[MediaDownloader] = None
+
+    def _log(self, message: str, level: str = "info"):
+        """记录日志并通过回调通知"""
+        getattr(logger, level if level != "success" else "info")(message)
+        if self._on_log:
+            self._on_log(message, level)
+
+    @property
+    def _stopped(self) -> bool:
+        """检查是否收到停止信号"""
+        return self._stop_event is not None and self._stop_event.is_set()
 
     async def scrape(self, tid: int) -> tuple[bool, str]:
         """
@@ -369,6 +393,8 @@ class ThreadScraper:
         if posts_page is None:
             return False, "无法获取帖子，可能已被删除"
 
+        self._log(f"帖子 {tid} 获取成功，开始处理")
+
         # 创建目录结构
         thread_dir = self.output_dir / "threads" / str(tid)
         thread_dir.mkdir(parents=True, exist_ok=True)
@@ -395,9 +421,15 @@ class ThreadScraper:
 
             # 爬取所有页
             total_pages = posts_page.page.total_page
-            logger.info(f"帖子 {tid} 共 {total_pages} 页")
+            self._log(f"帖子 {tid} 共 {total_pages} 页")
 
             for pn in range(1, total_pages + 1):
+                if self._stopped:
+                    self._log("收到停止信号，中止爬取", "warning")
+                    return False, "用户中止"
+
+                self._log(f"[页 {pn}/{total_pages}] 正在爬取...")
+
                 if pn > 1:
                     posts_page = await self._client.get_posts(
                         tid,
@@ -406,12 +438,12 @@ class ThreadScraper:
                         only_thread_author=self.only_thread_author,
                     )
                     if posts_page is None:
-                        logger.warning(f"无法获取第 {pn} 页")
+                        self._log(f"[页 {pn}/{total_pages}] 获取失败，跳过", "warning")
                         continue
 
                 # 处理这一页的帖子
                 await self._process_posts_page(
-                    posts_page, tid, pn, processor, db, asset_manager
+                    posts_page, tid, pn, total_pages, processor, db, asset_manager
                 )
 
             db.commit()
@@ -426,6 +458,7 @@ class ThreadScraper:
         posts_page,
         tid: int,
         pn: int,
+        total_pages: int,
         processor: ContentProcessor,
         db: ContentDatabase,
         asset_manager: AssetManager,
@@ -437,14 +470,24 @@ class ThreadScraper:
             posts_page: 帖子页数据
             tid: 帖子 ID
             pn: 页码
+            total_pages: 总页数
             processor: 内容处理器
             db: 数据库
             asset_manager: 资产管理器
         """
         thread_author_id = posts_page.thread.author_id
+        page_tag = f"[页 {pn}/{total_pages}]"
 
         # aiotieba 4.x: Posts 对象直接可迭代，不再有 .posts 属性
-        for post in posts_page:
+        posts_list = list(posts_page)
+        total_posts = len(posts_list)
+
+        for i, post in enumerate(posts_list, 1):
+            reply_num = getattr(post, "reply_num", 0)
+            self._log(
+                f"  {page_tag} [{i}/{total_posts}] "
+                f"#{post.floor}楼 ({len(post.contents)}个片段, {reply_num}条回复)"
+            )
             # 处理用户
             user = self._aiotieba_user_to_entity(post.user)
             db.insert_user(user)
@@ -455,7 +498,6 @@ class ThreadScraper:
             )
 
             # 创建帖子实体
-            reply_num = getattr(post, "reply_num", 0)
             post_entity = PostEntity(
                 id=post.pid,
                 contents=contents_json,
@@ -481,7 +523,7 @@ class ThreadScraper:
                 )
 
         db.commit()
-        logger.debug(f"第 {pn} 页处理完成")
+        self._log(f"  {page_tag} 完成，共 {total_posts} 条回复")
 
     async def _process_comments(
         self,
@@ -617,18 +659,21 @@ class ThreadScraper:
             f.write(thread_info.to_json())
 
     async def _save_scrape_info(self, tid: int, thread):
-        """保存爬取信息"""
-        scrape_info = ScrapeInfo(
-            scraper_version=self.VERSION,
-            scrape_time=int(time.time()),
-            tid=tid,
-            forum_name=getattr(thread, "fname", ""),
-            thread_title=thread.title,
-        )
-
+        """保存 TiebaReader 兼容的 scrape_info.json"""
         info_path = self.output_dir / "scrape_info.json"
+
+        # 加载已有或创建新的
+        info = ScrapeInfo.load_or_create(info_path, tid, self.VERSION)
+
+        # 添加本次爬取记录
+        info.scrape_records.append(ScrapeRecord(
+            scrape_time=int(time.time()),
+            scrape_config={},
+        ))
+        info.update_time = int(time.time())
+
         with open(info_path, "w", encoding="utf-8") as f:
-            f.write(scrape_info.to_json())
+            f.write(info.to_json())
 
     def _aiotieba_user_to_entity(self, user) -> UserEntity:
         """将 aiotieba 用户对象转换为 UserEntity"""
@@ -665,6 +710,8 @@ async def scrape_thread(
     output_dir: str | Path,
     download_media: bool = True,
     only_thread_author: bool = False,
+    on_log: Optional[Callable[[str, str], None]] = None,
+    stop_event: Optional[Any] = None,
 ) -> tuple[bool, str]:
     """
     爬取帖子的便捷函数
@@ -675,6 +722,8 @@ async def scrape_thread(
         output_dir: 输出目录
         download_media: 是否下载媒体
         only_thread_author: 是否只看楼主
+        on_log: 日志回调 (message, level)
+        stop_event: 停止信号（threading.Event）
 
     Returns:
         (是否成功, 错误信息)
@@ -684,6 +733,8 @@ async def scrape_thread(
         output_dir=output_dir,
         download_media=download_media,
         only_thread_author=only_thread_author,
+        on_log=on_log,
+        stop_event=stop_event,
     )
     return await scraper.scrape(tid)
 

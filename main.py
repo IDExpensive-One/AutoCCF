@@ -18,6 +18,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from AutoCCF.cli import CLI, Colors
 from AutoCCF.config import config_manager, UnifiedConfig
+from AutoCCF.utils import is_valid_bduss, UserPaths
 
 VERSION = "2.0.0"
 
@@ -52,6 +53,7 @@ class MainMenu:
     
     def show_main_menu(self) -> str:
         """显示主菜单"""
+        assert self.config is not None
         self.cli.print_section("主菜单")
         
         # 显示当前状态
@@ -102,71 +104,86 @@ class MainMenu:
     
     def run_apou(self):
         """运行 APoU 模块"""
+        assert self.config is not None
         self.cli.print_section("APoU - 获取用户发言列表")
-        
+
+        # 检查账户配置
+        if not self.config.has_valid_accounts():
+            self.cli.error("未配置有效的 BDUSS，请先在配置中添加账户")
+            print(f"  {Colors.DIM}编辑 config.json 添加 BDUSS{Colors.RESET}")
+            return
+
         try:
             username = input(f"{Colors.CYAN}? 请输入要爬取的用户名: {Colors.RESET}").strip()
             if not username:
                 self.cli.warning("已取消")
                 return
-            
-            # 创建用户目录
-            user_dir = self.config.get_user_dir(username)
-            user_dir.mkdir(parents=True, exist_ok=True)
-            
-            # 检查是否已有数据，询问是否增量更新
-            posts_file = user_dir / "posts.json"
+
+            # 使用 UserPaths 管理路径，确保使用新版目录结构
+            paths = UserPaths(self.config.database_dir, username)
+            paths.ensure_apou()
+
+            # 检查是否已有数据（兼容新旧路径），询问是否增量更新
+            posts_file = paths.get_posts_file()
             incremental = False
-            
-            if posts_file.exists():
+
+            if posts_file is not None:
                 choice = input(
                     f"{Colors.YELLOW}? 检测到已有数据，是否只获取新发言？[Y/n]: {Colors.RESET}"
                 ).strip().lower()
                 incremental = choice != "n"
                 if incremental:
                     self.cli.info("将使用增量模式，只获取新发言")
-            
+
+            # 获取第一个有效的 BDUSS
+            bduss = ""
+            for acc in self.config.accounts:
+                if is_valid_bduss(acc.bduss):
+                    bduss = acc.bduss
+                    self.cli.info(f"使用账户: {acc.name}")
+                    break
+
             # 导入并运行 APoU
             from APoU import UserPostsCrawler
             from APoU.config import CrawlerConfig
-            
+
             apou_config = CrawlerConfig(
+                bduss=bduss,
                 page_delay=self.config.apou.page_delay,
                 max_retries=self.config.apou.max_retries,
             )
-            
+
             mode_text = "增量更新" if incremental else "完整获取"
             self.cli.print_config([
                 ("目标用户", username),
-                ("输出目录", str(user_dir)),
+                ("输出目录", str(paths.apou_dir)),
                 ("页间延迟", f"{self.config.apou.page_delay} 秒"),
                 ("模式", mode_text),
+                ("API", "aiotieba (protobuf)"),
             ])
-            
+
             print()
-            
+
+            import asyncio
             import time
             start_time = time.time()
-            
-            with UserPostsCrawler(apou_config, cli=self.cli) as crawler:
-                posts = crawler.crawl(
-                    username=username,
-                    save_raw=self.config.apou.save_raw,
-                    save_incremental=True,
-                    output_dir=str(user_dir),
-                    incremental=incremental,
-                )
-                
-                elapsed = time.time() - start_time
-                
-                if posts:
-                    # crawler.crawl 已经保存到 output_dir/posts.json
-                    output_file = user_dir / "posts.json"
-                    self.cli.success(f"已保存 {len(posts)} 条发言到 {output_file}")
-                    self.cli.info(f"耗时: {self.cli.format_duration(elapsed)}")
-                else:
-                    self.cli.warning("未获取到任何发言")
-        
+
+            crawler = UserPostsCrawler(apou_config, cli=self.cli)
+            posts = asyncio.run(crawler.crawl(
+                username=username,
+                save_incremental=True,
+                output_dir=str(paths.apou_dir),
+                incremental=incremental,
+            ))
+
+            elapsed = time.time() - start_time
+
+            if posts:
+                self.cli.success(f"已保存 {len(posts)} 条发言到 {paths.posts_file}")
+                self.cli.info(f"耗时: {self.cli.format_duration(elapsed)}")
+            else:
+                self.cli.warning("未获取到任何发言")
+
         except KeyboardInterrupt:
             print()
             self.cli.warning("已取消")
@@ -175,6 +192,7 @@ class MainMenu:
     
     def run_dopj(self):
         """运行 DoPJ 模块"""
+        assert self.config is not None
         self.cli.print_section("DoPJ - 获取帖子详情")
         
         # 检查账户配置
@@ -231,19 +249,20 @@ class MainMenu:
     
     def _run_dopj_for_user(self, username: str, posts_file: str):
         """为指定用户运行 DoPJ"""
+        assert self.config is not None
         from DoPJ.cli import DoPJRunner
-        
+
         user_dir = self.config.get_user_dir(username)
-        
+
         self.cli.print_config([
             ("目标用户", username),
             ("输入文件", posts_file),
             ("输出目录", str(user_dir)),
             ("并发线程", str(self.config.dopj.threads)),
         ])
-        
+
         # 构建账户配置
-        accounts_config = {
+        config_dict = {
             "accounts": [
                 {"name": acc.name, "bduss": acc.bduss}
                 for acc in self.config.accounts
@@ -251,36 +270,23 @@ class MainMenu:
             "min_interval": self.config.dopj.min_interval,
             "max_fails": self.config.dopj.max_fails,
         }
-        
-        # 临时保存配置文件
-        import tempfile
-        import json
-        
-        with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".json", delete=False, encoding="utf-8"
-        ) as f:
-            json.dump(accounts_config, f, ensure_ascii=False)
-            temp_config = f.name
-        
+
         try:
             runner = DoPJRunner(
                 input_json=posts_file,
-                config_file=temp_config,
+                config_dict=config_dict,
                 output_dir=str(user_dir),
                 threads=self.config.dopj.threads,
                 max_retries=self.config.dopj.max_retries,
                 cli=self.cli,
             )
-            
+
             # 默认启用增量模式（跳过已存档的帖子）
             runner.load_tasks(incremental=True)
             runner.run()
-            
+
         except Exception as e:
             self.cli.error(f"爬取失败: {e}")
-        finally:
-            # 清理临时文件
-            os.unlink(temp_config)
     
     def show_users(self):
         """显示用户列表"""
@@ -329,6 +335,7 @@ class MainMenu:
     
     def _show_user_detail(self, username: str):
         """显示用户详情"""
+        assert self.config is not None
         user_dir = self.config.get_user_dir(username)
         
         if not user_dir.exists():
@@ -352,12 +359,11 @@ class MainMenu:
     
     def show_settings(self):
         """显示设置"""
+        assert self.config is not None
         self.cli.print_section("配置设置")
         
-        config_path = self.config._config_path or "config.json"
-        
         self.cli.print_config([
-            ("配置文件", config_path),
+            ("配置文件", self.config.config_path),
             ("数据目录", self.config.database_dir),
             ("账户数量", str(len(self.config.accounts))),
         ])
@@ -376,12 +382,12 @@ class MainMenu:
         print(f"  {Colors.GRAY}账户列表:{Colors.RESET}")
         for acc in self.config.accounts:
             bduss_preview = acc.bduss[:20] + "..." if len(acc.bduss) > 20 else acc.bduss
-            valid = len(acc.bduss) > 50 and not acc.bduss.startswith("你的")
+            valid = is_valid_bduss(acc.bduss)
             status = f"{Colors.GREEN}有效{Colors.RESET}" if valid else f"{Colors.RED}无效{Colors.RESET}"
             print(f"    {acc.name}: {bduss_preview} [{status}]")
         
         print()
-        print(f"  {Colors.DIM}编辑 {config_path} 修改配置{Colors.RESET}")
+        print(f"  {Colors.DIM}编辑 {self.config.config_path} 修改配置{Colors.RESET}")
 
 
 def main():

@@ -6,11 +6,8 @@ Tests for custom exception classes in APoU/exceptions.py
 import pytest
 from APoU.exceptions import (
     APoUError,
+    AuthError,
     NetworkError,
-    APIError,
-    ParseError,
-    RateLimitError,
-    EmptyPageError,
     MaxRetriesExceededError,
 )
 
@@ -68,91 +65,29 @@ class TestNetworkError:
         assert isinstance(error, APoUError)
 
 
-class TestAPIError:
-    """Test APIError class"""
+class TestAuthError:
+    """Test AuthError class"""
 
     def test_default_message(self):
         """Test default error message"""
-        error = APIError()
+        error = AuthError()
         
-        assert error.message == "API 返回错误"
-        assert error.status_code == 0
-
-    def test_with_status_code(self):
-        """Test error with status code"""
-        error = APIError("Server error", status_code=500)
-        
-        assert error.status_code == 500
-        assert error.details == "状态码: 500"
-        assert str(error) == "Server error: 状态码: 500"
-
-    def test_with_response_text(self):
-        """Test error with response text"""
-        error = APIError("Bad request", status_code=400, response_text='{"error": "invalid"}')
-        
-        assert error.response_text == '{"error": "invalid"}'
-
-
-class TestParseError:
-    """Test ParseError class"""
-
-    def test_default_message(self):
-        """Test default error message"""
-        error = ParseError()
-        
-        assert error.message == "数据解析失败"
-
-    def test_with_raw_data(self):
-        """Test error with raw data"""
-        raw = "Invalid JSON {{{{"
-        error = ParseError("JSON parse failed", raw_data=raw)
-        
-        assert error.raw_data == raw
-        assert error.details == raw
-
-    def test_raw_data_truncation(self):
-        """Test that long raw data is truncated"""
-        raw = "x" * 300
-        error = ParseError("Parse failed", raw_data=raw)
-        
-        assert len(error.details) == 200
-
-
-class TestRateLimitError:
-    """Test RateLimitError class"""
-
-    def test_default_message(self):
-        """Test default error message"""
-        error = RateLimitError()
-        
-        assert error.message == "请求过于频繁"
-        assert error.retry_after == 0
-        assert error.details == ""
-
-    def test_with_retry_after(self):
-        """Test error with retry_after"""
-        error = RateLimitError("Too many requests", retry_after=60)
-        
-        assert error.retry_after == 60
-        assert error.details == "建议 60 秒后重试"
-
-
-class TestEmptyPageError:
-    """Test EmptyPageError class"""
-
-    def test_creation(self):
-        """Test creating EmptyPageError"""
-        error = EmptyPageError(page=5)
-        
-        assert error.page == 5
-        assert error.message == "页面数据为空"
-        assert error.details == "第 5 页"
+        assert error.message == "认证失败"
+        assert str(error) == "认证失败"
 
     def test_custom_message(self):
         """Test custom error message"""
-        error = EmptyPageError(page=10, message="No data found")
+        error = AuthError("登录失效")
         
-        assert error.message == "No data found"
+        assert error.message == "登录失效"
+        assert error.details == ""
+        assert str(error) == "登录失效"
+
+    def test_inheritance(self):
+        """Test AuthError inherits from APoUError"""
+        error = AuthError()
+        
+        assert isinstance(error, APoUError)
 
 
 class TestMaxRetriesExceededError:
@@ -180,11 +115,8 @@ class TestExceptionHierarchy:
     def test_all_inherit_from_base(self):
         """Test all exceptions inherit from APoUError"""
         exceptions = [
+            AuthError(),
             NetworkError(),
-            APIError(),
-            ParseError(),
-            RateLimitError(),
-            EmptyPageError(1),
             MaxRetriesExceededError(1, 1),
         ]
         
