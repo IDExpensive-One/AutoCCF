@@ -1,4 +1,4 @@
-# Electron 迁移实现计划（修订版 v3.1）
+# Electron 迁移实现计划（修订版 v3.2）
 
 > **面向 AI 代理的工作者：** 必需子技能：使用 superpowers:subagent-driven-development（推荐）或 superpowers:executing-plans 逐任务实现此计划。步骤使用复选框（`- [ ]`）语法来跟踪进度。
 
@@ -499,7 +499,7 @@ def handle_users_list(payload: dict) -> None:
 
 
 def handle_users_detail(payload: dict) -> None:
-    """获取用户详情"""
+    """获取用户详情 — 返回 posts, threads, files 三个维度的数据"""
     username = payload.get("username", "")
     if not username:
         emit("error", {"code": "INVALID_PAYLOAD", "message": "缺少 username 参数"})
@@ -509,12 +509,22 @@ def handle_users_detail(payload: dict) -> None:
     from AutoCCF.utils import UserPaths
     cm = ConfigManager()
     config = cm.load()
+    user_dir = config.get_user_dir(username)
+
+    result = {
+        "username": username,
+        "user_dir": str(user_dir),
+        "posts": [],
+        "threads": [],
+        "files": [],
+    }
+
+    if not user_dir.exists():
+        emit("result", {"success": True, "detail": result})
+        return
+
+    # 1. 加载 posts（优先新路径 apou/posts.json，回退旧路径 posts.json）
     user_paths = UserPaths(config.database_dir, username)
-
-    detail = {"username": username, "posts": [], "has_dopj": False}
-
-    # 加载 APoU 数据（顶级 JSON 数组格式）
-    # 使用 get_posts_file() 兼容新路径（apou/posts.json）和旧路径（posts.json）
     posts_file = user_paths.get_posts_file()  # 返回实际存在的路径，不存在返回 None
     if posts_file is not None:
         try:
@@ -522,16 +532,87 @@ def handle_users_detail(payload: dict) -> None:
                 data = json.load(f)
                 # 兼容两种格式：顶级数组 或 {"posts": [...]}
                 if isinstance(data, list):
-                    detail["posts"] = data
+                    result["posts"] = data
                 elif isinstance(data, dict):
-                    detail["posts"] = data.get("posts", [])
+                    result["posts"] = data.get("posts", [])
         except (json.JSONDecodeError, OSError):
             pass
 
-    # 检查 DoPJ 数据
-    detail["has_dopj"] = user_paths.dopj_dir.exists()
+    # 2. 加载 threads（优先 dopj/index.json → 扫描 dopj/ → 扫描旧版 threads/）
+    index_file = user_dir / "dopj" / "index.json"
+    if not index_file.exists():
+        index_file = user_dir / "index.json"
+    if index_file.exists():
+        try:
+            with open(index_file, "r", encoding="utf-8") as f:
+                index_data = json.load(f)
+            for entry in index_data.get("entries", []):
+                result["threads"].append({
+                    "tid": entry.get("tid"),
+                    "title": entry.get("title", ""),
+                    "status": entry.get("status", "unknown"),
+                })
+        except (json.JSONDecodeError, OSError):
+            pass
+    else:
+        # 扫描 dopj/ 或旧版 threads/ 目录
+        scan_dirs = [user_dir / "dopj", user_dir / "threads"]
+        for scan_dir in scan_dirs:
+            if scan_dir.exists():
+                for sub in sorted(scan_dir.iterdir()):
+                    if sub.is_dir() and sub.name.isdigit():
+                        tid = int(sub.name)
+                        title = ""
+                        thread_json = sub / "thread.json"
+                        if not thread_json.exists():
+                            thread_json = sub / "threads" / sub.name / "thread.json"
+                        if thread_json.exists():
+                            try:
+                                with open(thread_json, "r", encoding="utf-8") as f:
+                                    t = json.load(f)
+                                    title = t.get("title", "")
+                            except Exception:
+                                pass
+                        result["threads"].append({"tid": tid, "title": title, "status": "unknown"})
+                if result["threads"]:
+                    break  # 找到数据就不再扫描旧版目录
 
-    emit("result", {"success": True, "detail": detail})
+    # 3. 列出 user_dir 根目录的文件和子目录
+    try:
+        for entry in sorted(user_dir.iterdir()):
+            is_dir = entry.is_dir()
+            if is_dir:
+                size_text = f"{sum(1 for _ in entry.iterdir())} 项"
+            else:
+                size_bytes = entry.stat().st_size
+                if size_bytes < 1024:
+                    size_text = f"{size_bytes} B"
+                elif size_bytes < 1024 * 1024:
+                    size_text = f"{size_bytes / 1024:.1f} KB"
+                else:
+                    size_text = f"{size_bytes / 1024 / 1024:.1f} MB"
+            result["files"].append({
+                "name": entry.name,
+                "is_dir": is_dir,
+                "size_text": size_text,
+            })
+    except OSError:
+        pass
+
+    emit("result", {"success": True, "detail": result})
+
+
+def handle_apou_outputs(payload: dict) -> None:
+    """查找所有 APoU 输出文件 — 使用 ConfigManager.find_apou_outputs()"""
+    from AutoCCF.config import ConfigManager
+    cm = ConfigManager()
+    cm.load()
+    try:
+        outputs = cm.find_apou_outputs()
+        # 返回格式: [{"username": "团子传说", "path": "/abs/path/posts.json", "posts_count": 142, "has_index": true}, ...]
+        emit("result", {"success": True, "outputs": outputs})
+    except Exception as e:
+        emit("error", {"code": "APOU_OUTPUTS_ERROR", "message": str(e)})
 
 
 # Action 路由表
@@ -539,6 +620,7 @@ ACTION_HANDLERS = {
     "config:load": handle_config_load,
     "config:save": handle_config_save,
     "apou:crawl": handle_apou_crawl,
+    "apou:outputs": handle_apou_outputs,
     "dopj:crawl": handle_dopj_crawl,
     "users:list": handle_users_list,
     "users:detail": handle_users_detail,
@@ -602,15 +684,32 @@ git commit -m "feat: 实现 Python bridge 通信层"
 - [ ] **步骤 1：在 main.js 中添加 IPC handler**
 
 在 `main.js` 中添加 `ipcMain.handle('bridge:invoke', ...)` 处理函数：
+
+**Python 解释器发现（在 `app.whenReady()` 后执行）：**
+- Windows：依次尝试 `py -3`、`python`
+- POSIX (macOS/Linux)：依次尝试 `python3`、`python`
+- 使用 `child_process.execFile` 运行 `--version` 验证候选解释器可用性
+- 如果所有候选都失败，创建窗口后通过 `webContents.send('python:unavailable')` 通知 renderer 显示安装引导页面
+- 将找到的解释器路径缓存为 `pythonCommand` 变量
+
+**bridge.py 路径解析：**
+- 开发模式：`path.join(__dirname, '..', 'electron', 'bridge.py')`（基于 `__dirname`）
+- 生产模式：`path.join(process.resourcesPath, 'bridge.py')`（bridge.py 作为 `extraResources` 打包）
+- 判断方式：`app.isPackaged`
+
+**工作目录：**
+- Python bridge 进程的 `cwd` 设为项目根目录（`app.isPackaged ? process.resourcesPath : path.join(__dirname, '..')`），确保 `sys.path.insert(0, PROJECT_ROOT)` 能正确找到 `APoU/`、`DoPJ/`、`AutoCCF/` 模块
+
+**IPC handler 逻辑：**
 - 接收 `{ action, payload }` 参数
-- `child_process.spawn('python', ['bridge.py'])` 启动 Python
+- `child_process.spawn(pythonCommand, [bridgePath], { cwd: projectRoot })` 启动 Python
 - 将 JSON 写入 stdin
 - 逐行读取 stdout，解析 NDJSON
 - `progress` 和 `log` 事件通过 `webContents.send()` 推送到 renderer
 - `result` 或 `error` 作为 Promise 返回值
-- **不设固定超时** — 爬取操作（`apou:crawl`、`dopj:crawl`）可能运行数十分钟；仅对非爬取操作（`config:load`、`config:save`、`users:list`、`users:detail`）设置 30 秒超时
+- **不设固定超时** — 爬取操作（`apou:crawl`、`dopj:crawl`）可能运行数十分钟；仅对非爬取操作（`config:load`、`config:save`、`users:list`、`users:detail`、`apou:outputs`）设置 30 秒超时
 - 处理进程异常退出（非零退出码 → reject Promise with error）
-- 可选：通过 `AbortController` 支持前端取消正在运行的爬取
+- **不实现取消功能**（V1 规格明确不做取消，见 spec 2.1 功能清单）
 
 - [ ] **步骤 2：在 preload.js 中暴露 API**
 
@@ -791,6 +890,7 @@ export const api = {
   },
   apou: {
     crawl: (username) => window.api.invoke('apou:crawl', { username }),  // 配置参数从已保存设置读取
+    outputs: () => window.api.invoke('apou:outputs', {}),  // 查找所有 APoU 输出文件
   },
   dopj: {
     crawl: (inputJson) => window.api.invoke('dopj:crawl', { input_json: inputJson }),  // threads 等参数从已保存设置读取
@@ -958,15 +1058,15 @@ git commit -m "feat: 实现 APoU 爬取视图"
 
 DoPJ 视图包含：
 - 页面标题："帖子详情爬取 (DoPJ)"
-- 用户选择下拉框（从 `api.users.list()` 填充已爬取用户）
+- 用户选择下拉框（从 `api.apou.outputs()` 填充有 APoU 输出的用户，其中 `path` 字段直接作为 `dopj:crawl` 的 `input_json` 参数）
 - **不包含配置滑块** — 线程数、重试次数、最小间隔等参数统一在"设置"页面配置，爬取时直接读取已保存的配置
 - 账户状态表：显示每个 BDUSS 账户名 + 状态标签
 - 进度区卡片：进度条 + 成功/失败/跳过统计
 - 实时日志区
 
 功能：
-- 选择用户后，自动定位其 posts.json 路径
-- 点击"开始爬取"→ 调用 `api.dopj.crawl(userFile)`（线程数等参数从已保存设置读取）
+- 下拉框显示 `apou:outputs` 返回的用户列表（`username` + `posts_count`），选中后保存对应 `path` 值
+- 点击"开始爬取"→ 调用 `api.dopj.crawl(selectedPath)`（`path` 来自 `apou:outputs` 的返回值，不在 renderer 中拼路径）
 - 监听进度和日志事件
 - 账户状态表从 `api.config.load()` 获取账户列表
 
@@ -1006,10 +1106,13 @@ git commit -m "feat: 实现 DoPJ 爬取视图"
 
 用户详情包含：
 - 返回按钮 → 回到用户列表
-- 用户信息头部：用户名、帖子数统计
-- 标签页切换：帖子列表 / 主题列表
-- 帖子表格：标题 | 贴吧 | 时间 | 链接
+- 用户信息头部：用户名、帖子数统计、用户目录路径
+- 标签页切换：帖子列表 / 主题列表 / 文件浏览（三个标签页）
+- **帖子标签页**：帖子表格 — 标题 | 贴吧 | 时间 | 链接
+- **主题标签页**：主题表格 — TID | 标题 | 状态（从 `detail.threads` 渲染）
+- **文件标签页**：文件/目录列表 — 名称 | 类型 | 大小（从 `detail.files` 渲染）
 - 通过 `api.users.detail(username)` 加载数据
+- 返回数据包含 `username`、`user_dir`、`posts`、`threads`、`files` 五个字段
 
 - [ ] **步骤 3：验证用户视图**
 
@@ -1577,8 +1680,8 @@ python -m pytest tests/test_bridge/test_bridge.py -v
 # IPC 集成测试
 python -m pytest tests/test_ipc/test_ipc_integration.py -v
 
-# E2E payload 测试（需要有效配置，可能跳过）
-python -m pytest tests/test_e2e/test_payload.py -v --timeout=180
+# E2E payload 集成测试（需要有效配置和网络，可能跳过）
+python -m pytest tests/test_e2e/test_payload.py -v -m integration --timeout=300
 
 # Playwright UI 冒烟测试（需要 Playwright 环境，可能跳过）
 cd electron && npx playwright test ../tests/test_ui/test_smoke.js
