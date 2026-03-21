@@ -1,4 +1,4 @@
-# Electron 迁移实现计划（修订版 v3.3）
+# Electron 迁移实现计划（修订版 v3.4）
 
 > **面向 AI 代理的工作者：** 必需子技能：使用 superpowers:subagent-driven-development（推荐）或 superpowers:executing-plans 逐任务实现此计划。步骤使用复选框（`- [ ]`）语法来跟踪进度。
 
@@ -93,8 +93,10 @@ module.exports = {
     ],
     extraResource: [
       // Python bridge 和业务模块必须打包到 resources/ 下（asar 外），
-      // 否则 child_process.spawn 无法访问
-      '../bridge.py',
+      // 否则 child_process.spawn 无法访问。
+      // 路径相对于 forge.config.js 所在目录（即 electron/），
+      // 所以 './bridge.py' 解析为 electron/bridge.py。
+      './bridge.py',
       '../APoU',
       '../DoPJ',
       '../AutoCCF',
@@ -224,7 +226,7 @@ python -m pytest tests/test_bridge/test_bridge.py -v
 
 **关键 API 约束（必须遵循）：**
 - `DoPJRunner.__init__` 使用 `input_json`（非 `input_file`），需要 `config_dict`（非 `accounts`/`on_log`）
-- `DoPJRunner` 没有 `on_log` 回调；传 `cli=None` 即可避免 print 污染
+- `DoPJRunner` 没有 `on_log` 回调；传 `_BridgeCli` 桩对象以转发 `info()`/`warning()`/`error()` 等调用为 NDJSON log 事件
 - `ConfigManager` 没有 `save()` 方法；保存通过 `UnifiedConfig.save(path)` 实现
 - `ConfigManager.load()` 始终返回 `UnifiedConfig`（从不返回 None）
 - `ConfigManager.list_users()` 返回字段为 `"name"`（不是 `"username"`）
@@ -414,6 +416,7 @@ def handle_dopj_crawl(payload: dict) -> None:
     from AutoCCF.utils import UserPaths
 
     input_json = payload.get("input_json", "")
+    threads_override = payload.get("threads")  # 可选：从 payload 传入线程数
 
     if not input_json:
         emit("error", {"code": "INVALID_PAYLOAD", "message": "缺少 input_json 参数"})
@@ -425,7 +428,8 @@ def handle_dopj_crawl(payload: dict) -> None:
         emit("error", {"code": "NO_ACCOUNTS", "message": "未配置账户"})
         return
 
-    threads = config.dopj.threads  # 从已保存设置读取线程数
+    # 优先使用 payload 传入的 threads，否则回退到已保存配置
+    threads = threads_override if threads_override is not None else config.dopj.threads
 
     # 从 input_json 路径推导 dopj 输出目录
     # input_json 格式: database_dir/username/apou/posts.json
@@ -445,13 +449,31 @@ def handle_dopj_crawl(payload: dict) -> None:
     }
 
     try:
+        # _BridgeCli 桩：将 DoPJRunner 的 CLI 调用转发为 NDJSON log 事件
+        # DoPJRunner 内部的 if self.cli: 守卫会调用这些方法，而非裸 print()
+        class _BridgeCli:
+            """将 CLI 方法调用转发为 NDJSON log 事件"""
+            def info(self, msg: str) -> None: emit("log", {"level": "info", "message": msg})
+            def warning(self, msg: str) -> None: emit("log", {"level": "warning", "message": msg})
+            def error(self, msg: str) -> None: emit("log", {"level": "error", "message": msg})
+            def success(self, msg: str) -> None: emit("log", {"level": "info", "message": msg})
+            def progress(self, msg: str) -> None: emit("log", {"level": "info", "message": msg})
+            def print_section(self, title: str, **kw: object) -> None: pass
+            def print_config(self, **kw: object) -> None: pass
+            def print_task(self, **kw: object) -> None: pass
+            def print_progress_bar(self, **kw: object) -> None: pass
+            def clear_line(self) -> None: pass
+            def format_duration(self, seconds: float) -> str: return f"{seconds:.1f}s"
+            def print_stats_box(self, **kw: object) -> None: pass
+            def print_footer(self, **kw: object) -> None: pass
+
         runner = DoPJRunner(
             input_json=input_json,  # 注意：参数名是 input_json 不是 input_file
             output_dir=output_dir,  # 使用 UserPaths.dopj_dir，不是 dirname(input_json)
             threads=min(threads, len(config.accounts)),
             max_retries=config.dopj.max_retries,
             config_dict=config_dict,  # 注意：使用 config_dict 不是 accounts
-            cli=None,  # cli=None 防止 print 污染（DoPJRunner 内部有 if self.cli: 守卫）
+            cli=_BridgeCli(),  # 使用 _BridgeCli 桩转发日志到 NDJSON（spec 要求 dopj:crawl 返回 log 事件）
         )
         runner.load_tasks()
 
@@ -923,7 +945,7 @@ export const api = {
     outputs: () => window.api.invoke('apou:outputs', {}),  // 查找所有 APoU 输出文件
   },
   dopj: {
-    crawl: (inputJson) => window.api.invoke('dopj:crawl', { input_json: inputJson }),  // threads 等参数从已保存设置读取
+    crawl: (inputJson, threads) => window.api.invoke('dopj:crawl', { input_json: inputJson, threads }),  // threads 可选，未传则从已保存设置读取
   },
   users: {
     list: () => window.api.invoke('users:list', {}),
@@ -1098,7 +1120,7 @@ DoPJ 视图包含：
 
 功能：
 - 下拉框显示 `apou:outputs` 返回的用户列表（`username` + `posts_count`），选中后保存对应 `path` 值
-- 点击"开始爬取"→ 调用 `api.dopj.crawl(selectedPath)`（`path` 来自 `apou:outputs` 的返回值，不在 renderer 中拼路径）
+- 点击"开始爬取"→ 调用 `api.dopj.crawl(selectedPath)`（`path` 来自 `apou:outputs` 的返回值，不在 renderer 中拼路径；`threads` 参数不传，由 bridge 从已保存配置读取——符合 spec 3.3 的 payload 定义 `{input_json, threads}` 中 threads 为可选值，与 spec 3.3 注释 "仅传递必要的运行参数" 一致）
 - 监听进度和日志事件
 - 账户状态表从 `api.config.load()` 获取账户列表
 
@@ -1386,10 +1408,11 @@ class TestDoPJPayload:
             pytest.skip(f"APoU 输出文件不存在（已检查新旧路径）")
 
         input_json = str(posts_file)
+        output_dir = str(user_paths.dopj_dir)  # DoPJ 输出目录，用于验证 thread.json 存在
 
         results = run_bridge(
             "dopj:crawl",
-            {"input_json": input_json},  # threads 从已保存配置读取
+            {"input_json": input_json},  # threads 可选，未传则从已保存配置读取
             timeout=300,
         )
 
@@ -1398,6 +1421,12 @@ class TestDoPJPayload:
         assert last["data"]["success"] is True
         stats = last["data"]["stats"]
         assert stats.get("total", 0) > 0, "应该有任务"
+        assert stats.get("success", 0) > 0, "至少有一个任务应成功完成"
+
+        # 验证 DoPJ 输出目录存在并包含 thread.json
+        import glob
+        thread_jsons = glob.glob(os.path.join(output_dir, "**", "thread.json"), recursive=True)
+        assert len(thread_jsons) > 0, f"DoPJ 输出目录应包含至少一个 thread.json 文件（搜索目录: {output_dir}）"
 
 
 @pytest.mark.integration
@@ -1450,22 +1479,28 @@ git commit -m "test: 添加 E2E payload 测试（团子传说）"
 
 ---
 
-## 任务 12：IPC 集成测试
+## 任务 12：Bridge 协议集成测试
 
 **文件：**
 - 创建：`tests/test_ipc/__init__.py`
 - 创建：`tests/test_ipc/test_ipc_integration.py`
 
-- [ ] **步骤 1：编写 IPC 集成测试**
+> **范围说明：** 此任务通过 subprocess 直接测试 bridge.py 的 NDJSON 协议和进程生命周期，模拟 Electron main.js 的行为。
+> 这验证了 Python bridge 的协议正确性（JSON 格式、退出码、stdout/stderr 隔离），但不包含 Electron 进程内的 IPC 通信路径。
+> 完整的 Electron IPC 端到端验证由任务 13（Playwright 冒烟测试）覆盖。
 
-测试 Electron spawn Python bridge 的完整通信链路：
+- [ ] **步骤 1：编写 Bridge 协议集成测试**
+
+测试 bridge.py 的 NDJSON 协议和进程生命周期（模拟 Electron main.js 的 spawn 行为）：
 
 ```python
 # tests/test_ipc/test_ipc_integration.py
 """
-IPC 集成测试 — 验证 bridge.py 的 NDJSON 协议和进程生命周期
+Bridge 协议集成测试 — 验证 bridge.py 的 NDJSON 协议和进程生命周期
 
-不需要 Electron 环境，直接通过 subprocess 模拟 main.js 的行为。
+通过 subprocess 直接测试 bridge.py（模拟 Electron main.js 的 spawn 行为），
+验证协议层正确性（JSON 格式、退出码、stdout/stderr 隔离）。
+不需要 Electron 环境。
 """
 import json
 import os
@@ -1573,7 +1608,7 @@ python -m pytest tests/test_ipc/test_ipc_integration.py -v
 
 ```bash
 git add tests/test_ipc/
-git commit -m "test: 添加 IPC 集成测试"
+git commit -m "test: 添加 bridge 协议集成测试"
 ```
 
 ---
@@ -1655,6 +1690,8 @@ test('所有 5 个视图可渲染', async () => {
 
 test('user-detail 视图可通过导航渲染', async () => {
   // user-detail 不在 sidebar 中，通过 users 列表项点击导航到达
+  // 注意：此测试依赖数据库中已有用户数据。如果没有用户，测试仅验证 users 视图渲染正确，
+  // 不视为失败。完整的 user-detail 渲染由 E2E payload 测试（task 11）间接覆盖。
   const page = await app.firstWindow();
   await page.click('[data-view="users"]');
   // 如果有用户条目则点击进入详情；否则仅验证 users 视图已渲染
@@ -1770,7 +1807,7 @@ git commit -m "chore: 集成验证和清理临时测试代码"
       └→ 任务 9 (用户) ← 依赖任务 5
       └→ 任务 10 (设置) ← 依赖任务 5
   └→ 任务 11 (E2E 测试) ← 依赖任务 2
-  └→ 任务 12 (IPC 集成测试) ← 依赖任务 2
+  └→ 任务 12 (Bridge 协议集成测试) ← 依赖任务 2
   └→ 任务 13 (Playwright 冒烟测试) ← 依赖任务 5-10
   └→ 任务 14 (集成验证) ← 依赖所有
 ```
