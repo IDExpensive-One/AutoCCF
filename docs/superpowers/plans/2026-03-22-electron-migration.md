@@ -1,4 +1,4 @@
-# Electron 迁移实现计划
+# Electron 迁移实现计划（修订版 v2）
 
 > **面向 AI 代理的工作者：** 必需子技能：使用 superpowers:subagent-driven-development（推荐）或 superpowers:executing-plans 逐任务实现此计划。步骤使用复选框（`- [ ]`）语法来跟踪进度。
 
@@ -8,7 +8,7 @@
 
 **技术栈：** Electron 33+, Node.js 20+, Python 3.10+, Electron Forge
 
-**规格文档：** `docs/superpowers/specs/2026-03-22-electron-migration-design.md`
+**规格文档：** `docs/superpowers/specs/2026-03-22-electron-migration-design.md`（v2）
 
 **工作目录：** `.worktrees/electron-migration/`
 
@@ -42,6 +42,10 @@
 | `tests/test_bridge/__init__.py` | 创建 | 测试包初始化 |
 | `tests/test_e2e/test_payload.py` | 创建 | E2E payload 测试（团子传说） |
 | `tests/test_e2e/__init__.py` | 创建 | 测试包初始化 |
+| `tests/test_ipc/__init__.py` | 创建 | IPC 集成测试包初始化 |
+| `tests/test_ipc/test_ipc_integration.py` | 创建 | IPC 集成测试（NDJSON 协议验证） |
+| `tests/test_ui/__init__.py` | 创建 | UI 冒烟测试包初始化 |
+| `tests/test_ui/test_smoke.js` | 创建 | Playwright UI 冒烟测试 |
 
 ---
 
@@ -209,6 +213,15 @@ python -m pytest tests/test_bridge/test_bridge.py -v
 
 创建 `electron/bridge.py`，包含：
 
+**关键 API 约束（必须遵循）：**
+- `DoPJRunner.__init__` 使用 `input_json`（非 `input_file`），需要 `config_dict`（非 `accounts`/`on_log`）
+- `DoPJRunner` 没有 `on_log` 回调；传 `cli=None` 即可避免 print 污染
+- `ConfigManager` 没有 `save()` 方法；保存通过 `UnifiedConfig.save(path)` 实现
+- `ConfigManager.load()` 始终返回 `UnifiedConfig`（从不返回 None）
+- `config:load` 返回**完整 BDUSS**（掩码仅在 renderer 端处理）
+- `UserPostsCrawler._print()` 即使传了 `on_log`，在 `cli=None` 时仍会 fallthrough 到 `print()`
+- APoU 输出是**顶级 JSON 数组** `[post1, post2, ...]`
+
 ```python
 """
 AutoCCF Python Bridge
@@ -216,38 +229,63 @@ AutoCCF Python Bridge
 Electron 与 Python 业务逻辑之间的通信桥接层。
 从 stdin 读取 JSON 请求，将结果/进度以 NDJSON 写入 stdout。
 """
+import io
 import json
 import sys
 import os
 import asyncio
-from typing import Any
+from typing import Any, TextIO
 
 # 将项目根目录加入 sys.path
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, PROJECT_ROOT)
 
+# ── stdout 重定向：防止裸 print() 污染 NDJSON 通道 ──
+_real_stdout: TextIO = sys.stdout
+
+
+class _NdjsonStdoutWrapper(io.TextIOBase):
+    """拦截所有 print() 调用，将其包装为 NDJSON log 事件"""
+
+    def __init__(self, real_stdout: TextIO) -> None:
+        self._real = real_stdout
+
+    def write(self, s: str) -> int:
+        text = s.strip()
+        if text:  # 忽略空行和纯换行
+            line = json.dumps(
+                {"type": "log", "data": {"level": "debug", "message": text}},
+                ensure_ascii=False,
+            )
+            self._real.write(line + "\n")
+            self._real.flush()
+        return len(s)
+
+    def flush(self) -> None:
+        self._real.flush()
+
+
+sys.stdout = _NdjsonStdoutWrapper(_real_stdout)
+
 
 def emit(msg_type: str, data: dict) -> None:
-    """输出一行 NDJSON 到 stdout"""
+    """输出一行 NDJSON 到真实 stdout"""
     line = json.dumps({"type": msg_type, "data": data}, ensure_ascii=False)
-    sys.stdout.write(line + "\n")
-    sys.stdout.flush()
+    _real_stdout.write(line + "\n")
+    _real_stdout.flush()
 
 
 def handle_config_load(payload: dict) -> None:
-    """加载配置文件"""
+    """加载配置文件，返回完整 BDUSS（掩码在 renderer 端处理）"""
     from AutoCCF.config import ConfigManager
     cm = ConfigManager()
     try:
-        config = cm.load()
-        if config is None:
-            emit("error", {"code": "CONFIG_NOT_FOUND", "message": "未找到配置文件"})
-            return
+        config = cm.load()  # 始终返回 UnifiedConfig（不返回 None）
         emit("result", {
             "success": True,
             "config": {
                 "database_dir": config.database_dir,
-                "accounts": [{"name": a.name, "bduss": a.bduss[:8] + "..."} for a in config.accounts],
+                "accounts": [{"name": a.name, "bduss": a.bduss} for a in config.accounts],
                 "apou": {"page_delay": config.apou.page_delay, "max_retries": config.apou.max_retries},
                 "dopj": {
                     "threads": config.dopj.threads,
@@ -262,18 +300,12 @@ def handle_config_load(payload: dict) -> None:
 
 
 def handle_config_save(payload: dict) -> None:
-    """保存配置文件"""
-    from AutoCCF.config import ConfigManager, UnifiedConfig, Account, APoUConfig, DoPJConfig
-    cm = ConfigManager()
+    """保存配置文件 — 使用 UnifiedConfig.from_dict() + .save()"""
+    from AutoCCF.config import UnifiedConfig
     try:
-        config = UnifiedConfig(
-            database_dir=payload.get("database_dir", "./database"),
-            accounts=[Account(**a) for a in payload.get("accounts", [])],
-            apou=APoUConfig(**payload.get("apou", {})),
-            dopj=DoPJConfig(**payload.get("dopj", {})),
-        )
-        cm.save(config)
-        emit("result", {"success": True, "message": "配置已保存"})
+        config = UnifiedConfig.from_dict(payload)
+        saved_path = config.save()  # 调用 UnifiedConfig.save()，非 ConfigManager.save()
+        emit("result", {"success": True, "path": saved_path})
     except Exception as e:
         emit("error", {"code": "CONFIG_SAVE_ERROR", "message": str(e)})
 
@@ -293,16 +325,11 @@ def handle_apou_crawl(payload: dict) -> None:
     cm = ConfigManager()
     config = cm.load()
     bduss = ""
-    output_dir = "./database"
-    page_delay = 2.0
-    max_retries = 3
-
-    if config:
-        output_dir = config.database_dir
-        page_delay = config.apou.page_delay
-        max_retries = config.apou.max_retries
-        if config.accounts:
-            bduss = config.accounts[0].bduss
+    output_dir = config.database_dir
+    page_delay = config.apou.page_delay
+    max_retries = config.apou.max_retries
+    if config.accounts:
+        bduss = config.accounts[0].bduss
 
     crawler_config = CrawlerConfig(
         page_delay=page_delay,
@@ -311,7 +338,12 @@ def handle_apou_crawl(payload: dict) -> None:
     )
 
     def on_page_complete(page_num: int, posts_count: int) -> None:
-        emit("progress", {"current": page_num, "total": 0, "message": f"第 {page_num} 页: {posts_count} 条"})
+        """每页完成回调 — 注意 APoU 总页数未知，使用 indeterminate 进度"""
+        emit("progress", {
+            "page": page_num,
+            "posts_count": posts_count,
+            "message": f"第 {page_num} 页: {posts_count} 条",
+        })
 
     def on_log(message: str, level: str) -> None:
         emit("log", {"level": level, "message": message})
@@ -341,38 +373,42 @@ def handle_apou_crawl(payload: dict) -> None:
 
 
 def handle_dopj_crawl(payload: dict) -> None:
-    """执行 DoPJ 爬取"""
+    """执行 DoPJ 爬取 — 使用 input_json 和 config_dict 参数"""
     from DoPJ.cli import DoPJRunner
     from AutoCCF.config import ConfigManager
 
-    user_file = payload.get("user_file", "")
+    input_json = payload.get("input_json", "")
     threads = payload.get("threads", 3)
 
-    if not user_file:
-        emit("error", {"code": "INVALID_PAYLOAD", "message": "缺少 user_file 参数"})
+    if not input_json:
+        emit("error", {"code": "INVALID_PAYLOAD", "message": "缺少 input_json 参数"})
         return
 
     cm = ConfigManager()
     config = cm.load()
-    if not config or not config.accounts:
+    if not config.accounts:
         emit("error", {"code": "NO_ACCOUNTS", "message": "未配置账户"})
         return
 
-    accounts = [{"name": a.name, "bduss": a.bduss} for a in config.accounts]
-
-    def on_progress(message: str, level: str = "info") -> None:
-        emit("log", {"level": level, "message": message})
+    # 构建 config_dict 格式（与 DoPJ/cli.py:707-711 一致）
+    config_dict = {
+        "accounts": [{"name": a.name, "bduss": a.bduss} for a in config.accounts],
+        "min_interval": config.dopj.min_interval,
+        "max_fails": config.dopj.max_fails,
+    }
 
     try:
         runner = DoPJRunner(
-            input_file=user_file,
-            accounts=accounts,
-            threads=min(threads, len(accounts)),
-            output_dir=os.path.dirname(user_file),
-            on_log=on_progress,
+            input_json=input_json,  # 注意：参数名是 input_json 不是 input_file
+            output_dir=os.path.dirname(input_json),
+            threads=min(threads, len(config.accounts)),
+            max_retries=config.dopj.max_retries,
+            config_dict=config_dict,  # 注意：使用 config_dict 不是 accounts
+            cli=None,  # cli=None 防止 print 污染（DoPJRunner 内部有 if self.cli: 守卫）
         )
+        runner.load_tasks()
         runner.run()
-        stats = runner.get_stats()
+        stats = runner.task_manager.get_stats()  # 通过 task_manager 获取统计
         emit("result", {
             "success": True,
             "stats": stats,
@@ -382,33 +418,15 @@ def handle_dopj_crawl(payload: dict) -> None:
 
 
 def handle_users_list(payload: dict) -> None:
-    """列出已爬取的用户"""
+    """列出已爬取的用户 — 使用 ConfigManager.list_users()"""
     from AutoCCF.config import ConfigManager
     cm = ConfigManager()
-    config = cm.load()
-    database_dir = config.database_dir if config else "./database"
-
-    users = []
-    if os.path.isdir(database_dir):
-        for name in os.listdir(database_dir):
-            user_dir = os.path.join(database_dir, name)
-            if os.path.isdir(user_dir):
-                posts_file = os.path.join(user_dir, "apou", "posts.json")
-                has_posts = os.path.exists(posts_file)
-                posts_count = 0
-                if has_posts:
-                    try:
-                        with open(posts_file, "r", encoding="utf-8") as f:
-                            data = json.load(f)
-                            posts_count = len(data.get("posts", data if isinstance(data, list) else []))
-                    except (json.JSONDecodeError, OSError):
-                        pass
-                users.append({
-                    "username": name,
-                    "has_posts": has_posts,
-                    "posts_count": posts_count,
-                })
-    emit("result", {"success": True, "users": users})
+    cm.load()
+    try:
+        users = cm.list_users()  # 复用现有实现，不重新实现文件系统扫描
+        emit("result", {"success": True, "users": users})
+    except Exception as e:
+        emit("error", {"code": "USERS_LIST_ERROR", "message": str(e)})
 
 
 def handle_users_detail(payload: dict) -> None:
@@ -422,17 +440,20 @@ def handle_users_detail(payload: dict) -> None:
     from AutoCCF.utils import UserPaths
     cm = ConfigManager()
     config = cm.load()
-    database_dir = config.database_dir if config else "./database"
-    user_paths = UserPaths(database_dir, username)
+    user_paths = UserPaths(config.database_dir, username)
 
     detail = {"username": username, "posts": [], "has_dopj": False}
 
-    # 加载 APoU 数据
+    # 加载 APoU 数据（顶级 JSON 数组格式）
     if user_paths.posts_file.exists():
         try:
             with open(user_paths.posts_file, "r", encoding="utf-8") as f:
                 data = json.load(f)
-                detail["posts"] = data.get("posts", data if isinstance(data, list) else [])
+                # 兼容两种格式：顶级数组 或 {"posts": [...]}
+                if isinstance(data, list):
+                    detail["posts"] = data
+                elif isinstance(data, dict):
+                    detail["posts"] = data.get("posts", [])
         except (json.JSONDecodeError, OSError):
             pass
 
@@ -574,6 +595,8 @@ git commit -m "feat: 实现 Electron IPC bridge 通信"
 - 创建：`electron/renderer/styles/layout.css`
 - 创建：`electron/renderer/styles/components.css`
 
+**注意：** CSS 文件创建后可通过 `index.html` 引入验证语法正确性，但完整的视觉验证需要在任务 5（路由/HTML 结构）完成后进行。此任务的验收标准是 CSS 文件正确加载、无语法错误。
+
 - [ ] **步骤 1：创建 reset.css**
 
 使用标准 CSS reset（box-sizing, margin/padding reset, 字体 smoothing）。
@@ -697,7 +720,7 @@ export const api = {
     crawl: (username) => window.api.invoke('apou:crawl', { username }),
   },
   dopj: {
-    crawl: (userFile, threads) => window.api.invoke('dopj:crawl', { user_file: userFile, threads }),
+    crawl: (inputJson, threads) => window.api.invoke('dopj:crawl', { input_json: inputJson, threads }),
   },
   users: {
     list: () => window.api.invoke('users:list', {}),
@@ -833,7 +856,8 @@ APoU 视图包含：
 - 监听 `api.onProgress()` 更新进度条
 - 监听 `api.onLog()` 追加日志
 - 爬取完成后显示结果统计
-- 爬取中禁用按钮，显示"停止"选项
+- 爬取中禁用按钮，完成后恢复
+- 进度条使用 indeterminate 模式（总页数未知），显示 "已爬取 X 条帖子" 实时计数
 
 - [ ] **步骤 2：验证 APoU 视图**
 
@@ -1048,9 +1072,13 @@ class TestAPoUPayload:
         """测试 APoU 爬取 '团子传说' 用户的发言"""
         results = run_bridge("apou:crawl", {"username": TARGET_USERNAME}, timeout=120)
 
-        # 应该有 progress 事件
+        # 应该有 progress 事件（使用 page/posts_count 字段）
         progress_events = [r for r in results if r["type"] == "progress"]
         assert len(progress_events) > 0, "应该收到 progress 事件"
+        # 验证 progress 事件格式
+        for p in progress_events:
+            assert "page" in p["data"], "progress 应包含 page 字段"
+            assert "posts_count" in p["data"], "progress 应包含 posts_count 字段"
 
         # 最后一条应该是 result
         last = results[-1]
@@ -1058,6 +1086,67 @@ class TestAPoUPayload:
         assert last["data"]["success"] is True
         assert last["data"]["posts_count"] > 0, "应该爬取到帖子"
         assert "output_file" in last["data"]
+
+        # 验证输出文件是顶级 JSON 数组格式
+        output_file = last["data"]["output_file"]
+        if os.path.exists(output_file):
+            with open(output_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            assert isinstance(data, list), f"APoU 输出应为顶级 JSON 数组，实际类型: {type(data)}"
+            if len(data) > 0:
+                assert "tid" in data[0], "每条帖子应包含 tid 字段"
+                assert "title" in data[0], "每条帖子应包含 title 字段"
+                assert "href" in data[0], "每条帖子应包含 href 字段"
+
+@pytest.mark.skipif(not has_valid_config(), reason="需要有效的 config.json 配置")
+class TestDoPJPayload:
+    """DoPJ 爬取 payload 测试（在 APoU 爬取后运行）"""
+
+    def test_dopj_crawl_succeeds(self):
+        """测试 DoPJ 爬取帖子详情（仅爬取 1 个线程验证流程）"""
+        # 首先获取 APoU 输出文件路径
+        users_results = run_bridge("users:list", {}, timeout=10)
+        last = users_results[-1]
+        if last["type"] != "result":
+            pytest.skip("无法获取用户列表")
+        users = last["data"].get("users", [])
+        target_user = None
+        for u in users:
+            if u.get("username") == TARGET_USERNAME:
+                target_user = u
+                break
+        if target_user is None:
+            pytest.skip(f"数据库中没有用户 '{TARGET_USERNAME}'，需先运行 APoU 测试")
+
+        # 获取 input_json 路径
+        detail_results = run_bridge("users:detail", {"username": TARGET_USERNAME}, timeout=10)
+        detail_last = detail_results[-1]
+        if detail_last["type"] != "result":
+            pytest.skip("无法获取用户详情")
+
+        # 使用 input_json 参数调用 DoPJ
+        # 注意：需要知道 posts.json 的实际路径
+        from AutoCCF.config import ConfigManager
+        from AutoCCF.utils import UserPaths
+        cm = ConfigManager()
+        config = cm.load()
+        user_paths = UserPaths(config.database_dir, TARGET_USERNAME)
+        input_json = str(user_paths.posts_file)
+
+        if not os.path.exists(input_json):
+            pytest.skip(f"APoU 输出文件不存在: {input_json}")
+
+        results = run_bridge(
+            "dopj:crawl",
+            {"input_json": input_json, "threads": 1},  # 使用 input_json 参数名
+            timeout=300,
+        )
+
+        last = results[-1]
+        assert last["type"] == "result", f"最后一条应该是 result，实际为: {last}"
+        assert last["data"]["success"] is True
+        stats = last["data"]["stats"]
+        assert stats.get("total", 0) > 0, "应该有任务"
 
 @pytest.mark.skipif(not has_valid_config(), reason="需要有效的 config.json 配置")
 class TestUsersPayload:
@@ -1071,7 +1160,6 @@ class TestUsersPayload:
         users = last["data"]["users"]
         usernames = [u["username"] for u in users]
         # 注意：此测试假设 APoU 测试已先运行
-        # 如果数据库中没有该用户，测试会跳过
         if TARGET_USERNAME not in usernames:
             pytest.skip(f"数据库中没有用户 '{TARGET_USERNAME}'")
 
@@ -1084,6 +1172,8 @@ class TestUsersPayload:
         assert last["type"] == "result"
         detail = last["data"]["detail"]
         assert detail["username"] == TARGET_USERNAME
+        # 验证帖子是列表格式
+        assert isinstance(detail["posts"], list), "帖子应为列表格式"
 ```
 
 - [ ] **步骤 2：运行 E2E 测试**
@@ -1104,7 +1194,237 @@ git commit -m "test: 添加 E2E payload 测试（团子传说）"
 
 ---
 
-## 任务 12：集成验证和清理
+## 任务 12：IPC 集成测试
+
+**文件：**
+- 创建：`tests/test_ipc/__init__.py`
+- 创建：`tests/test_ipc/test_ipc_integration.py`
+
+- [ ] **步骤 1：编写 IPC 集成测试**
+
+测试 Electron spawn Python bridge 的完整通信链路：
+
+```python
+# tests/test_ipc/test_ipc_integration.py
+"""
+IPC 集成测试 — 验证 bridge.py 的 NDJSON 协议和进程生命周期
+
+不需要 Electron 环境，直接通过 subprocess 模拟 main.js 的行为。
+"""
+import json
+import os
+import subprocess
+import sys
+import time
+import pytest
+
+BRIDGE_PATH = os.path.join(os.path.dirname(__file__), '..', '..', 'electron', 'bridge.py')
+
+def test_ndjson_format_validity():
+    """验证所有输出行都是有效的 NDJSON"""
+    request = json.dumps({"action": "config:load", "payload": {}})
+    proc = subprocess.run(
+        [sys.executable, BRIDGE_PATH],
+        input=request,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    for line in proc.stdout.strip().splitlines():
+        if line.strip():
+            parsed = json.loads(line)  # 如果不是有效 JSON 会抛异常
+            assert "type" in parsed, "每行必须包含 type 字段"
+            assert "data" in parsed, "每行必须包含 data 字段"
+            assert parsed["type"] in ("result", "error", "progress", "log")
+
+def test_process_exits_cleanly():
+    """验证 bridge.py 处理完请求后正常退出"""
+    request = json.dumps({"action": "config:load", "payload": {}})
+    proc = subprocess.run(
+        [sys.executable, BRIDGE_PATH],
+        input=request,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert proc.returncode == 0, f"进程应正常退出，实际退出码: {proc.returncode}"
+
+def test_stderr_does_not_contain_ndjson():
+    """验证 stderr 不包含 NDJSON（stdout 专用）"""
+    request = json.dumps({"action": "config:load", "payload": {}})
+    proc = subprocess.run(
+        [sys.executable, BRIDGE_PATH],
+        input=request,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    for line in proc.stderr.strip().splitlines():
+        if line.strip():
+            # stderr 行不应该是 NDJSON 格式
+            try:
+                parsed = json.loads(line)
+                if "type" in parsed and "data" in parsed:
+                    pytest.fail(f"stderr 不应包含 NDJSON: {line}")
+            except json.JSONDecodeError:
+                pass  # stderr 可以包含非 JSON 内容（如 Python warnings）
+
+def test_stdout_not_polluted_by_print():
+    """验证 stdout 拦截器将裸 print() 包装为 log 事件"""
+    request = json.dumps({"action": "config:load", "payload": {}})
+    proc = subprocess.run(
+        [sys.executable, BRIDGE_PATH],
+        input=request,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    for line in proc.stdout.strip().splitlines():
+        if line.strip():
+            # 所有 stdout 行必须是有效 JSON
+            try:
+                json.loads(line)
+            except json.JSONDecodeError:
+                pytest.fail(f"stdout 中发现非 JSON 行（stdout 污染）: {line[:100]}")
+
+def test_timeout_handling():
+    """验证进程在收到空输入时快速退出"""
+    start = time.time()
+    proc = subprocess.run(
+        [sys.executable, BRIDGE_PATH],
+        input="",
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    elapsed = time.time() - start
+    assert elapsed < 5, f"空输入应快速退出，实际耗时: {elapsed:.1f}s"
+    responses = [json.loads(line) for line in proc.stdout.strip().splitlines() if line.strip()]
+    assert len(responses) >= 1
+    assert responses[0]["type"] == "error"
+```
+
+- [ ] **步骤 2：运行 IPC 集成测试**
+
+```bash
+cd .worktrees/electron-migration
+python -m pytest tests/test_ipc/test_ipc_integration.py -v
+```
+
+预期：所有测试通过
+
+- [ ] **步骤 3：Commit**
+
+```bash
+git add tests/test_ipc/
+git commit -m "test: 添加 IPC 集成测试"
+```
+
+---
+
+## 任务 13：UI 冒烟测试（Playwright）
+
+**文件：**
+- 创建：`tests/test_ui/__init__.py`
+- 创建：`tests/test_ui/test_smoke.js`
+
+**注意：** 此任务需要 Playwright 和 electron 同时安装。如果 Playwright 环境不可用，此任务标记为 `[blocked]`，不阻塞其他任务。
+
+- [ ] **步骤 1：编写 Playwright 冒烟测试**
+
+创建 `tests/test_ui/test_smoke.js`（使用 Playwright Electron 支持）：
+
+```javascript
+// tests/test_ui/test_smoke.js
+const { test, expect, _electron: electron } = require('@playwright/test');
+const path = require('path');
+
+let app;
+
+test.beforeAll(async () => {
+  app = await electron.launch({
+    args: [path.join(__dirname, '..', '..', 'electron', 'main.js')],
+  });
+});
+
+test.afterAll(async () => {
+  await app.close();
+});
+
+test('窗口标题包含 AutoCCF', async () => {
+  const page = await app.firstWindow();
+  const title = await page.title();
+  expect(title).toContain('AutoCCF');
+});
+
+test('侧边栏包含所有导航项', async () => {
+  const page = await app.firstWindow();
+  const navItems = await page.locator('.nav-item').allTextContents();
+  expect(navItems).toContain('首页');
+  expect(navItems).toContain('APoU');
+  expect(navItems).toContain('DoPJ');
+  expect(navItems).toContain('用户');
+  expect(navItems).toContain('设置');
+});
+
+test('导航切换到 APoU 视图', async () => {
+  const page = await app.firstWindow();
+  await page.click('[data-view="apou"]');
+  await expect(page.locator('#content')).toContainText('APoU');
+});
+
+test('导航切换到设置视图', async () => {
+  const page = await app.firstWindow();
+  await page.click('[data-view="settings"]');
+  await expect(page.locator('#content')).toContainText('设置');
+});
+
+test('APoU 视图有用户名输入框', async () => {
+  const page = await app.firstWindow();
+  await page.click('[data-view="apou"]');
+  const input = page.locator('input[placeholder*="用户名"]');
+  await expect(input).toBeVisible();
+});
+
+test('所有 6 个视图可渲染', async () => {
+  const page = await app.firstWindow();
+  const views = ['home', 'apou', 'dopj', 'users', 'settings'];
+  for (const view of views) {
+    await page.click(`[data-view="${view}"]`);
+    // 确保内容区不为空
+    const content = await page.locator('#content').textContent();
+    expect(content.trim().length).toBeGreaterThan(0);
+  }
+});
+```
+
+- [ ] **步骤 2：安装 Playwright 依赖**
+
+```bash
+cd electron
+npm install --save-dev @playwright/test
+npx playwright install
+```
+
+- [ ] **步骤 3：运行冒烟测试**
+
+```bash
+cd electron
+npx playwright test ../tests/test_ui/test_smoke.js
+```
+
+预期：所有 6 个视图冒烟测试通过
+
+- [ ] **步骤 4：Commit**
+
+```bash
+git add tests/test_ui/ electron/package.json
+git commit -m "test: 添加 Playwright UI 冒烟测试"
+```
+
+---
+
+## 任务 14：集成验证和清理
 
 **文件：**
 - 修改：`electron/renderer/index.html`（移除临时测试代码）
@@ -1132,10 +1452,12 @@ cd electron && npx electron .
 
 ```bash
 python -m pytest tests/test_bridge/ -v
+python -m pytest tests/test_ipc/ -v
 python -m pytest tests/test_e2e/test_payload.py -v --timeout=180
+cd electron && npx playwright test ../tests/test_ui/test_smoke.js
 ```
 
-预期：所有测试通过（或 E2E 测试因缺少配置被跳过）
+预期：bridge 和 IPC 测试全部通过，E2E 测试通过（或因缺少配置被跳过），Playwright 冒烟测试通过（或因环境不可用被跳过）
 
 - [ ] **步骤 4：Commit**
 
@@ -1160,7 +1482,9 @@ git commit -m "chore: 集成验证和清理临时测试代码"
       └→ 任务 9 (用户) ← 依赖任务 5
       └→ 任务 10 (设置) ← 依赖任务 5
   └→ 任务 11 (E2E 测试) ← 依赖任务 2
-  └→ 任务 12 (集成验证) ← 依赖所有
+  └→ 任务 12 (IPC 集成测试) ← 依赖任务 2
+  └→ 任务 13 (Playwright 冒烟测试) ← 依赖任务 5-10
+  └→ 任务 14 (集成验证) ← 依赖所有
 ```
 
-注意：任务 1/2/4 可以并行执行（无依赖）。任务 6-10 必须在任务 5 之后，但它们之间可以串行（共享 UI 框架）。任务 11 只依赖任务 2（bridge.py），可以与 UI 任务并行。
+注意：任务 1/2/4 可以并行执行（无依赖）。任务 6-10 必须在任务 5 之后，但它们之间可以串行（共享 UI 框架）。任务 11 和 12 只依赖任务 2（bridge.py），可以与 UI 任务并行。任务 13 需要所有 UI 视图就位后才能运行。
