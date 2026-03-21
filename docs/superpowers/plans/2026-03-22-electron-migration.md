@@ -1,4 +1,4 @@
-# Electron 迁移实现计划（修订版 v2）
+# Electron 迁移实现计划（修订版 v3）
 
 > **面向 AI 代理的工作者：** 必需子技能：使用 superpowers:subagent-driven-development（推荐）或 superpowers:executing-plans 逐任务实现此计划。步骤使用复选框（`- [ ]`）语法来跟踪进度。
 
@@ -8,7 +8,7 @@
 
 **技术栈：** Electron 33+, Node.js 20+, Python 3.10+, Electron Forge
 
-**规格文档：** `docs/superpowers/specs/2026-03-22-electron-migration-design.md`（v2）
+**规格文档：** `docs/superpowers/specs/2026-03-22-electron-migration-design.md`（v3）
 
 **工作目录：** `.worktrees/electron-migration/`
 
@@ -218,6 +218,8 @@ python -m pytest tests/test_bridge/test_bridge.py -v
 - `DoPJRunner` 没有 `on_log` 回调；传 `cli=None` 即可避免 print 污染
 - `ConfigManager` 没有 `save()` 方法；保存通过 `UnifiedConfig.save(path)` 实现
 - `ConfigManager.load()` 始终返回 `UnifiedConfig`（从不返回 None）
+- `ConfigManager.list_users()` 返回字段为 `"name"`（不是 `"username"`）
+- `UserPaths` 已存在于 `AutoCCF/utils.py:90`，`from AutoCCF.utils import UserPaths` 可直接使用
 - `config:load` 返回**完整 BDUSS**（掩码仅在 renderer 端处理）
 - `UserPostsCrawler._print()` 即使传了 `on_log`，在 `cli=None` 时仍会 fallthrough 到 `print()`
 - APoU 输出是**顶级 JSON 数组** `[post1, post2, ...]`
@@ -300,11 +302,19 @@ def handle_config_load(payload: dict) -> None:
 
 
 def handle_config_save(payload: dict) -> None:
-    """保存配置文件 — 使用 UnifiedConfig.from_dict() + .save()"""
-    from AutoCCF.config import UnifiedConfig
+    """保存配置 — load-mutate-save 模式，保留 config_path"""
+    from AutoCCF.config import ConfigManager, UnifiedConfig
     try:
-        config = UnifiedConfig.from_dict(payload)
-        saved_path = config.save()  # 调用 UnifiedConfig.save()，非 ConfigManager.save()
+        # 1. Load：先加载现有配置以获取 config_path
+        cm = ConfigManager()
+        existing = cm.load()
+        original_path = existing.config_path
+
+        # 2. Mutate：用 payload 创建新配置，但保留原始 config_path
+        new_config = UnifiedConfig.from_dict(payload, config_path=original_path)
+
+        # 3. Save：保存到原始路径
+        saved_path = new_config.save()
         emit("result", {"success": True, "path": saved_path})
     except Exception as e:
         emit("error", {"code": "CONFIG_SAVE_ERROR", "message": str(e)})
@@ -338,11 +348,11 @@ def handle_apou_crawl(payload: dict) -> None:
     )
 
     def on_page_complete(page_num: int, posts_count: int) -> None:
-        """每页完成回调 — 注意 APoU 总页数未知，使用 indeterminate 进度"""
+        """每页完成回调 — posts_count 是当页获取的帖子数（非累计值），renderer 负责累加"""
         emit("progress", {
             "page": page_num,
-            "posts_count": posts_count,
-            "message": f"第 {page_num} 页: {posts_count} 条",
+            "posts_in_page": posts_count,
+            "message": f"第 {page_num} 页: 本页 {posts_count} 条",
         })
 
     def on_log(message: str, level: str) -> None:
@@ -373,12 +383,14 @@ def handle_apou_crawl(payload: dict) -> None:
 
 
 def handle_dopj_crawl(payload: dict) -> None:
-    """执行 DoPJ 爬取 — 使用 input_json 和 config_dict 参数"""
+    """执行 DoPJ 爬取 — 在 worker 线程运行 runner.run()，主线程轮询 get_stats() 推送进度"""
+    import threading
+    import time as _time
     from DoPJ.cli import DoPJRunner
     from AutoCCF.config import ConfigManager
+    from AutoCCF.utils import UserPaths
 
     input_json = payload.get("input_json", "")
-    threads = payload.get("threads", 3)
 
     if not input_json:
         emit("error", {"code": "INVALID_PAYLOAD", "message": "缺少 input_json 参数"})
@@ -390,6 +402,18 @@ def handle_dopj_crawl(payload: dict) -> None:
         emit("error", {"code": "NO_ACCOUNTS", "message": "未配置账户"})
         return
 
+    threads = config.dopj.threads  # 从已保存设置读取线程数
+
+    # 从 input_json 路径推导 dopj 输出目录
+    # input_json 格式: database_dir/username/apou/posts.json
+    # 目标: database_dir/username/dopj/
+    input_path = os.path.abspath(input_json)
+    apou_dir = os.path.dirname(input_path)      # .../username/apou
+    user_dir = os.path.dirname(apou_dir)         # .../username
+    username = os.path.basename(user_dir)
+    user_paths = UserPaths(config.database_dir, username)
+    output_dir = str(user_paths.dopj_dir)
+
     # 构建 config_dict 格式（与 DoPJ/cli.py:707-711 一致）
     config_dict = {
         "accounts": [{"name": a.name, "bduss": a.bduss} for a in config.accounts],
@@ -400,15 +424,43 @@ def handle_dopj_crawl(payload: dict) -> None:
     try:
         runner = DoPJRunner(
             input_json=input_json,  # 注意：参数名是 input_json 不是 input_file
-            output_dir=os.path.dirname(input_json),
+            output_dir=output_dir,  # 使用 UserPaths.dopj_dir，不是 dirname(input_json)
             threads=min(threads, len(config.accounts)),
             max_retries=config.dopj.max_retries,
             config_dict=config_dict,  # 注意：使用 config_dict 不是 accounts
             cli=None,  # cli=None 防止 print 污染（DoPJRunner 内部有 if self.cli: 守卫）
         )
         runner.load_tasks()
-        runner.run()
-        stats = runner.task_manager.get_stats()  # 通过 task_manager 获取统计
+
+        # 在 worker 线程中运行 runner.run()（阻塞调用）
+        worker_error: list[Exception] = []
+
+        def _run_worker() -> None:
+            try:
+                runner.run()
+            except Exception as exc:
+                worker_error.append(exc)
+
+        worker = threading.Thread(target=_run_worker, daemon=True)
+        worker.start()
+
+        # 主线程每 2 秒轮询 get_stats() 推送进度
+        while worker.is_alive():
+            worker.join(timeout=2.0)
+            stats = runner.task_manager.get_stats()
+            emit("progress", {
+                "completed": stats.get("completed", 0),
+                "failed": stats.get("failed", 0),
+                "total": stats.get("total", 0),
+                "skipped": stats.get("skipped", 0),
+                "message": f"已完成 {stats.get('completed', 0)}/{stats.get('total', 0)}",
+            })
+
+        # worker 结束后检查错误
+        if worker_error:
+            raise worker_error[0]
+
+        stats = runner.task_manager.get_stats()
         emit("result", {
             "success": True,
             "stats": stats,
@@ -418,12 +470,12 @@ def handle_dopj_crawl(payload: dict) -> None:
 
 
 def handle_users_list(payload: dict) -> None:
-    """列出已爬取的用户 — 使用 ConfigManager.list_users()"""
+    """列出已爬取的用户 — 使用 ConfigManager.list_users()，返回 'name' 字段（非 'username'）"""
     from AutoCCF.config import ConfigManager
     cm = ConfigManager()
     cm.load()
     try:
-        users = cm.list_users()  # 复用现有实现，不重新实现文件系统扫描
+        users = cm.list_users()  # 返回 [{"name": ..., ...}]，注意字段是 "name" 不是 "username"
         emit("result", {"success": True, "users": users})
     except Exception as e:
         emit("error", {"code": "USERS_LIST_ERROR", "message": str(e)})
@@ -537,7 +589,9 @@ git commit -m "feat: 实现 Python bridge 通信层"
 - 逐行读取 stdout，解析 NDJSON
 - `progress` 和 `log` 事件通过 `webContents.send()` 推送到 renderer
 - `result` 或 `error` 作为 Promise 返回值
-- 处理进程超时（60秒）和异常退出
+- **不设固定超时** — 爬取操作（`apou:crawl`、`dopj:crawl`）可能运行数十分钟；仅对非爬取操作（`config:load`、`config:save`、`users:list`、`users:detail`）设置 30 秒超时
+- 处理进程异常退出（非零退出码 → reject Promise with error）
+- 可选：通过 `AbortController` 支持前端取消正在运行的爬取
 
 - [ ] **步骤 2：在 preload.js 中暴露 API**
 
@@ -717,10 +771,10 @@ export const api = {
     save: (config) => window.api.invoke('config:save', config),
   },
   apou: {
-    crawl: (username) => window.api.invoke('apou:crawl', { username }),
+    crawl: (username) => window.api.invoke('apou:crawl', { username }),  // 配置参数从已保存设置读取
   },
   dopj: {
-    crawl: (inputJson, threads) => window.api.invoke('dopj:crawl', { input_json: inputJson, threads }),
+    crawl: (inputJson) => window.api.invoke('dopj:crawl', { input_json: inputJson }),  // threads 等参数从已保存设置读取
   },
   users: {
     list: () => window.api.invoke('users:list', {}),
@@ -847,7 +901,7 @@ git commit -m "feat: 实现首页视图"
 APoU 视图包含：
 - 页面标题："用户发言列表爬取 (APoU)"
 - 用户名输入框 + "开始爬取" 按钮
-- 配置区卡片：页面延迟滑块 (0.5-10s)、最大重试次数滑块 (1-10)
+- **不包含配置滑块** — 页面延迟、重试次数等参数统一在"设置"页面配置，爬取时直接读取已保存的配置
 - 进度区卡片：进度条 + 状态文字（初始隐藏，爬取时显示）
 - 实时日志区卡片：`.log-viewer` 滚动区域
 
@@ -886,14 +940,14 @@ git commit -m "feat: 实现 APoU 爬取视图"
 DoPJ 视图包含：
 - 页面标题："帖子详情爬取 (DoPJ)"
 - 用户选择下拉框（从 `api.users.list()` 填充已爬取用户）
-- 配置区卡片：线程数滑块 (1-10)、最大重试次数滑块 (1-10)、最小间隔滑块 (0.5-10s)
+- **不包含配置滑块** — 线程数、重试次数、最小间隔等参数统一在"设置"页面配置，爬取时直接读取已保存的配置
 - 账户状态表：显示每个 BDUSS 账户名 + 状态标签
 - 进度区卡片：进度条 + 成功/失败/跳过统计
 - 实时日志区
 
 功能：
 - 选择用户后，自动定位其 posts.json 路径
-- 点击"开始爬取"→ 调用 `api.dopj.crawl(userFile, threads)`
+- 点击"开始爬取"→ 调用 `api.dopj.crawl(userFile)`（线程数等参数从已保存设置读取）
 - 监听进度和日志事件
 - 账户状态表从 `api.config.load()` 获取账户列表
 
@@ -1072,13 +1126,13 @@ class TestAPoUPayload:
         """测试 APoU 爬取 '团子传说' 用户的发言"""
         results = run_bridge("apou:crawl", {"username": TARGET_USERNAME}, timeout=120)
 
-        # 应该有 progress 事件（使用 page/posts_count 字段）
+        # 应该有 progress 事件（使用 page/posts_in_page 字段）
         progress_events = [r for r in results if r["type"] == "progress"]
         assert len(progress_events) > 0, "应该收到 progress 事件"
         # 验证 progress 事件格式
         for p in progress_events:
             assert "page" in p["data"], "progress 应包含 page 字段"
-            assert "posts_count" in p["data"], "progress 应包含 posts_count 字段"
+            assert "posts_in_page" in p["data"], "progress 应包含 posts_in_page 字段（每页帖子数）"
 
         # 最后一条应该是 result
         last = results[-1]
@@ -1112,7 +1166,7 @@ class TestDoPJPayload:
         users = last["data"].get("users", [])
         target_user = None
         for u in users:
-            if u.get("username") == TARGET_USERNAME:
+            if u.get("name") == TARGET_USERNAME:  # 注意：list_users() 返回 "name" 字段
                 target_user = u
                 break
         if target_user is None:
@@ -1138,7 +1192,7 @@ class TestDoPJPayload:
 
         results = run_bridge(
             "dopj:crawl",
-            {"input_json": input_json, "threads": 1},  # 使用 input_json 参数名
+            {"input_json": input_json},  # threads 从已保存配置读取
             timeout=300,
         )
 
@@ -1158,9 +1212,9 @@ class TestUsersPayload:
         last = results[-1]
         assert last["type"] == "result"
         users = last["data"]["users"]
-        usernames = [u["username"] for u in users]
+        names = [u["name"] for u in users]  # 注意：字段是 "name" 不是 "username"
         # 注意：此测试假设 APoU 测试已先运行
-        if TARGET_USERNAME not in usernames:
+        if TARGET_USERNAME not in names:
             pytest.skip(f"数据库中没有用户 '{TARGET_USERNAME}'")
 
     def test_user_detail_has_posts(self):
@@ -1386,7 +1440,7 @@ test('APoU 视图有用户名输入框', async () => {
   await expect(input).toBeVisible();
 });
 
-test('所有 6 个视图可渲染', async () => {
+test('所有 5 个视图可渲染', async () => {
   const page = await app.firstWindow();
   const views = ['home', 'apou', 'dopj', 'users', 'settings'];
   for (const view of views) {
@@ -1413,7 +1467,7 @@ cd electron
 npx playwright test ../tests/test_ui/test_smoke.js
 ```
 
-预期：所有 6 个视图冒烟测试通过
+预期：所有 5 个视图冒烟测试通过
 
 - [ ] **步骤 4：Commit**
 
@@ -1442,20 +1496,29 @@ cd electron && npx electron .
 
 预期：
 - 首页显示统计数据
-- 侧边栏导航切换 6 个视图
+- 侧边栏导航切换 5 个视图（首页、APoU、DoPJ、用户、设置）
 - APoU 视图可输入用户名并触发爬取
 - DoPJ 视图可选择用户并触发爬取
 - 用户列表显示已爬取用户
 - 设置页面可加载/保存配置
 
-- [ ] **步骤 3：运行所有测试**
+- [ ] **步骤 3：运行所有测试（逐文件串行执行）**
 
 ```bash
-python -m pytest tests/test_bridge/ -v
-python -m pytest tests/test_ipc/ -v
+# Bridge 单元测试
+python -m pytest tests/test_bridge/test_bridge.py -v
+
+# IPC 集成测试
+python -m pytest tests/test_ipc/test_ipc_integration.py -v
+
+# E2E payload 测试（需要有效配置，可能跳过）
 python -m pytest tests/test_e2e/test_payload.py -v --timeout=180
+
+# Playwright UI 冒烟测试（需要 Playwright 环境，可能跳过）
 cd electron && npx playwright test ../tests/test_ui/test_smoke.js
 ```
+
+注意：严格逐文件串行运行，禁止使用目录级 `pytest tests/` 命令。
 
 预期：bridge 和 IPC 测试全部通过，E2E 测试通过（或因缺少配置被跳过），Playwright 冒烟测试通过（或因环境不可用被跳过）
 
