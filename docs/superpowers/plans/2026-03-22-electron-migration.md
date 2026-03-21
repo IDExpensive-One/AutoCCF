@@ -1,4 +1,4 @@
-# Electron 迁移实现计划（修订版 v3）
+# Electron 迁移实现计划（修订版 v3.1）
 
 > **面向 AI 代理的工作者：** 必需子技能：使用 superpowers:subagent-driven-development（推荐）或 superpowers:executing-plans 逐任务实现此计划。步骤使用复选框（`- [ ]`）语法来跟踪进度。
 
@@ -338,8 +338,12 @@ def handle_apou_crawl(payload: dict) -> None:
     output_dir = config.database_dir
     page_delay = config.apou.page_delay
     max_retries = config.apou.max_retries
-    if config.accounts:
-        bduss = config.accounts[0].bduss
+
+    # 选取第一个有效 BDUSS（非空且非全空格），而非盲目取 accounts[0]
+    for account in config.accounts:
+        if account.bduss and account.bduss.strip():
+            bduss = account.bduss
+            break
 
     crawler_config = CrawlerConfig(
         page_delay=page_delay,
@@ -358,10 +362,20 @@ def handle_apou_crawl(payload: dict) -> None:
     def on_log(message: str, level: str) -> None:
         emit("log", {"level": level, "message": message})
 
+    # 创建 dummy cli 对象：阻止 _print() 在 cli=None 时 fallthrough 到 print()
+    # 这样 on_log 回调是唯一的日志通道，避免日志重复
+    class _DummyCli:
+        """桩对象 — 接收 _print() 的 cli 分支调用，但不输出任何内容"""
+        def info(self, msg: str) -> None: pass
+        def warning(self, msg: str) -> None: pass
+        def error(self, msg: str) -> None: pass
+        def success(self, msg: str) -> None: pass
+
     crawler = UserPostsCrawler(
         config=crawler_config,
         on_page_complete=on_page_complete,
         on_log=on_log,
+        cli=_DummyCli(),  # 传 dummy cli 防止 _print() fallthrough 到 print()
     )
 
     from AutoCCF.utils import UserPaths
@@ -448,12 +462,15 @@ def handle_dopj_crawl(payload: dict) -> None:
         while worker.is_alive():
             worker.join(timeout=2.0)
             stats = runner.task_manager.get_stats()
+            # 注意：get_stats() 返回 success/failed/pending/skipped/total（没有 completed）
+            done = stats.get("success", 0) + stats.get("failed", 0) + stats.get("skipped", 0)
             emit("progress", {
-                "completed": stats.get("completed", 0),
+                "success": stats.get("success", 0),
                 "failed": stats.get("failed", 0),
-                "total": stats.get("total", 0),
+                "pending": stats.get("pending", 0),
                 "skipped": stats.get("skipped", 0),
-                "message": f"已完成 {stats.get('completed', 0)}/{stats.get('total', 0)}",
+                "total": stats.get("total", 0),
+                "message": f"已完成 {done}/{stats.get('total', 0)}（成功 {stats.get('success', 0)}, 失败 {stats.get('failed', 0)}）",
             })
 
         # worker 结束后检查错误
@@ -497,9 +514,11 @@ def handle_users_detail(payload: dict) -> None:
     detail = {"username": username, "posts": [], "has_dopj": False}
 
     # 加载 APoU 数据（顶级 JSON 数组格式）
-    if user_paths.posts_file.exists():
+    # 使用 get_posts_file() 兼容新路径（apou/posts.json）和旧路径（posts.json）
+    posts_file = user_paths.get_posts_file()  # 返回实际存在的路径，不存在返回 None
+    if posts_file is not None:
         try:
-            with open(user_paths.posts_file, "r", encoding="utf-8") as f:
+            with open(posts_file, "r", encoding="utf-8") as f:
                 data = json.load(f)
                 # 兼容两种格式：顶级数组 或 {"posts": [...]}
                 if isinstance(data, list):
@@ -1066,30 +1085,64 @@ git commit -m "feat: 实现设置视图和目录选择器"
 
 ---
 
-## 任务 11：E2E Payload 测试
+## 任务 11：E2E Payload 集成测试
+
+> **注意**：此任务包含**集成测试**，需要有效的网络连接和 BDUSS 配置才能运行。
+> 这些测试会实际发起网络请求到百度贴吧 API，不适合 CI 自动运行。
+> DoPJ 测试会触发完整爬取（非仅 1 个线程），耗时可能较长。
+> 需要安装 pytest-timeout 插件：`pip install pytest-timeout`
 
 **文件：**
 - 创建：`tests/test_e2e/__init__.py`
+- 创建：`tests/test_e2e/conftest.py`
 - 创建：`tests/test_e2e/test_payload.py`
 
-- [ ] **步骤 1：编写 APoU payload 测试**
+- [ ] **步骤 1：创建 conftest.py 和编写 payload 测试**
+
+```python
+# tests/test_e2e/conftest.py
+"""E2E 集成测试配置 — 注册自定义 marker"""
+import pytest
+
+
+def pytest_configure(config):
+    config.addinivalue_line(
+        "markers", "integration: 需要网络连接和有效 BDUSS 配置的集成测试"
+    )
+```
 
 ```python
 # tests/test_e2e/test_payload.py
 """
-E2E Payload 测试 — 使用用户 ID '团子传说' 验证完整流程
+E2E Payload 集成测试 — 使用用户 ID '团子传说' 验证完整流程
 
-需要有效的 config.json 配置（包含 BDUSS 账户）。
-如果配置不存在或 BDUSS 无效，测试将被跳过。
+⚠️ 这是集成测试，需要：
+  1. 有效的 config.json 配置（包含 BDUSS 账户）
+  2. 可访问百度贴吧 API 的网络连接
+  3. pytest-timeout 插件（pip install pytest-timeout）
+
+如果配置不存在、BDUSS 无效或网络不可达，测试将被跳过。
+运行方式：python -m pytest tests/test_e2e/test_payload.py -v -m integration
 """
 import json
 import os
+import socket
 import subprocess
 import sys
 import pytest
 
 BRIDGE_PATH = os.path.join(os.path.dirname(__file__), '..', '..', 'electron', 'bridge.py')
 TARGET_USERNAME = "团子传说"
+
+
+def _network_available(host: str = "tieba.baidu.com", port: int = 443, timeout: float = 3.0) -> bool:
+    """检查是否有网络连接到百度贴吧"""
+    try:
+        socket.create_connection((host, port), timeout=timeout).close()
+        return True
+    except OSError:
+        return False
+
 
 def run_bridge(action: str, payload: dict, timeout: int = 120) -> list[dict]:
     """运行 bridge.py 并收集响应"""
@@ -1107,6 +1160,7 @@ def run_bridge(action: str, payload: dict, timeout: int = 120) -> list[dict]:
             responses.append(json.loads(line))
     return responses
 
+
 def has_valid_config() -> bool:
     """检查是否有有效配置"""
     try:
@@ -1118,9 +1172,16 @@ def has_valid_config() -> bool:
         pass
     return False
 
-@pytest.mark.skipif(not has_valid_config(), reason="需要有效的 config.json 配置")
+
+_skip_no_config = pytest.mark.skipif(not has_valid_config(), reason="需要有效的 config.json 配置（含 BDUSS）")
+_skip_no_network = pytest.mark.skipif(not _network_available(), reason="无法连接到 tieba.baidu.com，跳过集成测试")
+
+
+@pytest.mark.integration
+@_skip_no_config
+@_skip_no_network
 class TestAPoUPayload:
-    """APoU 爬取 payload 测试"""
+    """APoU 爬取 payload 集成测试"""
 
     def test_apou_crawl_returns_posts(self):
         """测试 APoU 爬取 '团子传说' 用户的发言"""
@@ -1152,12 +1213,18 @@ class TestAPoUPayload:
                 assert "title" in data[0], "每条帖子应包含 title 字段"
                 assert "href" in data[0], "每条帖子应包含 href 字段"
 
-@pytest.mark.skipif(not has_valid_config(), reason="需要有效的 config.json 配置")
+
+@pytest.mark.integration
+@_skip_no_config
+@_skip_no_network
 class TestDoPJPayload:
-    """DoPJ 爬取 payload 测试（在 APoU 爬取后运行）"""
+    """DoPJ 爬取 payload 集成测试（在 APoU 爬取后运行）
+
+    注意：此测试会触发 DoPJ 的完整爬取流程（所有线程），耗时可能较长。
+    """
 
     def test_dopj_crawl_succeeds(self):
-        """测试 DoPJ 爬取帖子详情（仅爬取 1 个线程验证流程）"""
+        """测试 DoPJ 爬取帖子详情"""
         # 首先获取 APoU 输出文件路径
         users_results = run_bridge("users:list", {}, timeout=10)
         last = users_results[-1]
@@ -1172,23 +1239,18 @@ class TestDoPJPayload:
         if target_user is None:
             pytest.skip(f"数据库中没有用户 '{TARGET_USERNAME}'，需先运行 APoU 测试")
 
-        # 获取 input_json 路径
-        detail_results = run_bridge("users:detail", {"username": TARGET_USERNAME}, timeout=10)
-        detail_last = detail_results[-1]
-        if detail_last["type"] != "result":
-            pytest.skip("无法获取用户详情")
-
-        # 使用 input_json 参数调用 DoPJ
-        # 注意：需要知道 posts.json 的实际路径
+        # 获取 input_json 路径 — 使用 get_posts_file() 兼容新旧路径
         from AutoCCF.config import ConfigManager
         from AutoCCF.utils import UserPaths
         cm = ConfigManager()
         config = cm.load()
         user_paths = UserPaths(config.database_dir, TARGET_USERNAME)
-        input_json = str(user_paths.posts_file)
+        posts_file = user_paths.get_posts_file()  # 返回实际存在的路径（新或旧），不存在返回 None
 
-        if not os.path.exists(input_json):
-            pytest.skip(f"APoU 输出文件不存在: {input_json}")
+        if posts_file is None:
+            pytest.skip(f"APoU 输出文件不存在（已检查新旧路径）")
+
+        input_json = str(posts_file)
 
         results = run_bridge(
             "dopj:crawl",
@@ -1202,9 +1264,12 @@ class TestDoPJPayload:
         stats = last["data"]["stats"]
         assert stats.get("total", 0) > 0, "应该有任务"
 
-@pytest.mark.skipif(not has_valid_config(), reason="需要有效的 config.json 配置")
+
+@pytest.mark.integration
+@_skip_no_config
+@_skip_no_network
 class TestUsersPayload:
-    """用户列表 payload 测试（在 APoU 爬取后运行）"""
+    """用户列表 payload 集成测试（在 APoU 爬取后运行）"""
 
     def test_users_list_contains_target(self):
         """测试用户列表包含目标用户"""
@@ -1230,14 +1295,15 @@ class TestUsersPayload:
         assert isinstance(detail["posts"], list), "帖子应为列表格式"
 ```
 
-- [ ] **步骤 2：运行 E2E 测试**
+- [ ] **步骤 2：运行 E2E 集成测试**
 
 ```bash
 cd .worktrees/electron-migration
-python -m pytest tests/test_e2e/test_payload.py -v --timeout=180
+pip install pytest-timeout  # 如未安装
+python -m pytest tests/test_e2e/test_payload.py -v -m integration --timeout=300
 ```
 
-预期：如果有有效 config.json，APoU 爬取成功并返回帖子；否则测试被跳过
+预期：如果有有效 config.json 且网络可达，APoU 爬取成功并返回帖子；否则测试被跳过
 
 - [ ] **步骤 3：Commit**
 
