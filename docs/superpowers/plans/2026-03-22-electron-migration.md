@@ -1,0 +1,1166 @@
+# Electron 迁移实现计划
+
+> **面向 AI 代理的工作者：** 必需子技能：使用 superpowers:subagent-driven-development（推荐）或 superpowers:executing-plans 逐任务实现此计划。步骤使用复选框（`- [ ]`）语法来跟踪进度。
+
+**目标：** 将 AutoCCF 的 Flet GUI 替换为 Electron 桌面应用，保持 Python 业务逻辑不变，实现扁平化 Light 主题 UI，并完成 `团子传说` 用户 ID 的全流程 payload 测试。
+
+**架构：** Electron Main Process 管理窗口和 Python 子进程（child_process.spawn），通过 JSON-over-stdio 协议通信。Renderer 使用原生 HTML/CSS/JS，通过 contextBridge 暴露的 window.api 调用后端。
+
+**技术栈：** Electron 33+, Node.js 20+, Python 3.10+, Electron Forge
+
+**规格文档：** `docs/superpowers/specs/2026-03-22-electron-migration-design.md`
+
+**工作目录：** `.worktrees/electron-migration/`
+
+---
+
+## 文件结构
+
+以下是将要创建或修改的文件及其职责：
+
+| 文件 | 操作 | 职责 |
+|------|------|------|
+| `electron/package.json` | 创建 | Node.js 项目配置、Electron 依赖 |
+| `electron/forge.config.js` | 创建 | Electron Forge 打包配置 |
+| `electron/main.js` | 创建 | Electron 主进程：窗口管理、IPC、Python 子进程 |
+| `electron/preload.js` | 创建 | contextBridge 安全桥接，暴露 window.api |
+| `electron/bridge.py` | 创建 | Python CLI bridge：JSON stdin/stdout 协议 |
+| `electron/renderer/index.html` | 创建 | 单页应用 HTML 入口 |
+| `electron/renderer/styles/reset.css` | 创建 | CSS Reset |
+| `electron/renderer/styles/variables.css` | 创建 | CSS 变量（颜色/间距/字体） |
+| `electron/renderer/styles/layout.css` | 创建 | 侧边栏/内容区布局 |
+| `electron/renderer/styles/components.css` | 创建 | 卡片/按钮/表单/表格/进度条 |
+| `electron/renderer/js/app.js` | 创建 | 路由、视图切换、全局状态 |
+| `electron/renderer/js/api.js` | 创建 | window.api 封装层 |
+| `electron/renderer/js/views/home.js` | 创建 | 首页视图 |
+| `electron/renderer/js/views/apou.js` | 创建 | APoU 爬取视图 |
+| `electron/renderer/js/views/dopj.js` | 创建 | DoPJ 爬取视图 |
+| `electron/renderer/js/views/users.js` | 创建 | 用户列表视图 |
+| `electron/renderer/js/views/user-detail.js` | 创建 | 用户详情视图 |
+| `electron/renderer/js/views/settings.js` | 创建 | 设置视图 |
+| `tests/test_bridge/test_bridge.py` | 创建 | bridge.py 单元测试 |
+| `tests/test_bridge/__init__.py` | 创建 | 测试包初始化 |
+| `tests/test_e2e/test_payload.py` | 创建 | E2E payload 测试（团子传说） |
+| `tests/test_e2e/__init__.py` | 创建 | 测试包初始化 |
+
+---
+
+## 任务 1：Electron 项目脚手架
+
+**文件：**
+- 创建：`electron/package.json`
+- 创建：`electron/forge.config.js`
+- 创建：`electron/main.js`（最小版本）
+- 创建：`electron/preload.js`（最小版本）
+- 创建：`electron/renderer/index.html`（最小版本）
+
+- [ ] **步骤 1：创建 package.json**
+
+```json
+{
+  "name": "autoccf",
+  "version": "1.0.0",
+  "description": "AutoCCF - 百度贴吧爬虫工具集",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron-forge start",
+    "package": "electron-forge package",
+    "make": "electron-forge make"
+  },
+  "devDependencies": {
+    "@electron-forge/cli": "^7.0.0",
+    "@electron-forge/maker-squirrel": "^7.0.0",
+    "@electron-forge/maker-zip": "^7.0.0",
+    "electron": "^33.0.0"
+  },
+  "dependencies": {}
+}
+```
+
+- [ ] **步骤 2：创建 forge.config.js**
+
+```javascript
+module.exports = {
+  packagerConfig: {
+    asar: true,
+    ignore: [
+      /\.git/,
+      /node_modules\/\.cache/,
+    ],
+  },
+  makers: [
+    { name: '@electron-forge/maker-squirrel', config: {} },
+    { name: '@electron-forge/maker-zip', platforms: ['darwin', 'linux'] },
+  ],
+};
+```
+
+- [ ] **步骤 3：创建最小 main.js**
+
+创建 `electron/main.js`，包含：
+- `BrowserWindow` 创建（1200x800）
+- `contextIsolation: true`, `nodeIntegration: false`, `sandbox: true`
+- 加载 `preload.js`
+- 加载 `renderer/index.html`
+- `app.on('ready')` 和 `app.on('window-all-closed')` 处理
+
+- [ ] **步骤 4：创建最小 preload.js**
+
+创建 `electron/preload.js`，包含：
+- `contextBridge.exposeInMainWorld('api', {})` 占位
+
+- [ ] **步骤 5：创建最小 index.html**
+
+创建 `electron/renderer/index.html`，包含：
+- `<!DOCTYPE html>` 基本结构
+- `<h1>AutoCCF</h1>` 占位内容
+- Content-Security-Policy meta 标签
+
+- [ ] **步骤 6：安装依赖并验证启动**
+
+```bash
+cd electron && npm install
+npx electron .
+```
+
+预期：Electron 窗口打开，显示 "AutoCCF" 标题
+
+- [ ] **步骤 7：Commit**
+
+```bash
+git add electron/
+git commit -m "feat: 初始化 Electron 项目脚手架"
+```
+
+---
+
+## 任务 2：Python Bridge（核心通信层）
+
+**文件：**
+- 创建：`electron/bridge.py`
+- 创建：`tests/test_bridge/__init__.py`
+- 创建：`tests/test_bridge/test_bridge.py`
+
+- [ ] **步骤 1：编写 bridge.py 测试 — JSON 解析和路由**
+
+```python
+# tests/test_bridge/test_bridge.py
+import json
+import subprocess
+import sys
+import os
+
+def run_bridge(action: str, payload: dict) -> list[dict]:
+    """启动 bridge.py 子进程，发送请求，收集所有响应行"""
+    bridge_path = os.path.join(os.path.dirname(__file__), '..', '..', 'electron', 'bridge.py')
+    request = json.dumps({"action": action, "payload": payload})
+    proc = subprocess.run(
+        [sys.executable, bridge_path],
+        input=request,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    responses = []
+    for line in proc.stdout.strip().splitlines():
+        if line.strip():
+            responses.append(json.loads(line))
+    return responses
+
+def test_unknown_action_returns_error():
+    results = run_bridge("unknown:action", {})
+    assert len(results) == 1
+    assert results[0]["type"] == "error"
+    assert "unknown" in results[0]["data"]["message"].lower()
+
+def test_config_load_returns_result():
+    results = run_bridge("config:load", {})
+    assert len(results) >= 1
+    last = results[-1]
+    assert last["type"] in ("result", "error")
+
+def test_invalid_json_handled():
+    bridge_path = os.path.join(os.path.dirname(__file__), '..', '..', 'electron', 'bridge.py')
+    proc = subprocess.run(
+        [sys.executable, bridge_path],
+        input="not valid json",
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    responses = []
+    for line in proc.stdout.strip().splitlines():
+        if line.strip():
+            responses.append(json.loads(line))
+    assert len(responses) >= 1
+    assert responses[0]["type"] == "error"
+```
+
+- [ ] **步骤 2：运行测试验证失败**
+
+```bash
+cd .worktrees/electron-migration
+python -m pytest tests/test_bridge/test_bridge.py -v
+```
+
+预期：FAIL，ModuleNotFoundError 或 FileNotFoundError
+
+- [ ] **步骤 3：实现 bridge.py**
+
+创建 `electron/bridge.py`，包含：
+
+```python
+"""
+AutoCCF Python Bridge
+
+Electron 与 Python 业务逻辑之间的通信桥接层。
+从 stdin 读取 JSON 请求，将结果/进度以 NDJSON 写入 stdout。
+"""
+import json
+import sys
+import os
+import asyncio
+from typing import Any
+
+# 将项目根目录加入 sys.path
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, PROJECT_ROOT)
+
+
+def emit(msg_type: str, data: dict) -> None:
+    """输出一行 NDJSON 到 stdout"""
+    line = json.dumps({"type": msg_type, "data": data}, ensure_ascii=False)
+    sys.stdout.write(line + "\n")
+    sys.stdout.flush()
+
+
+def handle_config_load(payload: dict) -> None:
+    """加载配置文件"""
+    from AutoCCF.config import ConfigManager
+    cm = ConfigManager()
+    try:
+        config = cm.load()
+        if config is None:
+            emit("error", {"code": "CONFIG_NOT_FOUND", "message": "未找到配置文件"})
+            return
+        emit("result", {
+            "success": True,
+            "config": {
+                "database_dir": config.database_dir,
+                "accounts": [{"name": a.name, "bduss": a.bduss[:8] + "..."} for a in config.accounts],
+                "apou": {"page_delay": config.apou.page_delay, "max_retries": config.apou.max_retries},
+                "dopj": {
+                    "threads": config.dopj.threads,
+                    "max_retries": config.dopj.max_retries,
+                    "min_interval": config.dopj.min_interval,
+                    "max_fails": config.dopj.max_fails,
+                },
+            },
+        })
+    except Exception as e:
+        emit("error", {"code": "CONFIG_ERROR", "message": str(e)})
+
+
+def handle_config_save(payload: dict) -> None:
+    """保存配置文件"""
+    from AutoCCF.config import ConfigManager, UnifiedConfig, Account, APoUConfig, DoPJConfig
+    cm = ConfigManager()
+    try:
+        config = UnifiedConfig(
+            database_dir=payload.get("database_dir", "./database"),
+            accounts=[Account(**a) for a in payload.get("accounts", [])],
+            apou=APoUConfig(**payload.get("apou", {})),
+            dopj=DoPJConfig(**payload.get("dopj", {})),
+        )
+        cm.save(config)
+        emit("result", {"success": True, "message": "配置已保存"})
+    except Exception as e:
+        emit("error", {"code": "CONFIG_SAVE_ERROR", "message": str(e)})
+
+
+def handle_apou_crawl(payload: dict) -> None:
+    """执行 APoU 爬取"""
+    from APoU.crawler import UserPostsCrawler
+    from APoU.config import CrawlerConfig
+    from AutoCCF.config import ConfigManager
+
+    username = payload.get("username", "")
+    if not username:
+        emit("error", {"code": "INVALID_PAYLOAD", "message": "缺少 username 参数"})
+        return
+
+    # 加载配置获取 BDUSS 和其他参数
+    cm = ConfigManager()
+    config = cm.load()
+    bduss = ""
+    output_dir = "./database"
+    page_delay = 2.0
+    max_retries = 3
+
+    if config:
+        output_dir = config.database_dir
+        page_delay = config.apou.page_delay
+        max_retries = config.apou.max_retries
+        if config.accounts:
+            bduss = config.accounts[0].bduss
+
+    crawler_config = CrawlerConfig(
+        page_delay=page_delay,
+        max_retries=max_retries,
+        bduss=bduss,
+    )
+
+    def on_page_complete(page_num: int, posts_count: int) -> None:
+        emit("progress", {"current": page_num, "total": 0, "message": f"第 {page_num} 页: {posts_count} 条"})
+
+    def on_log(message: str, level: str) -> None:
+        emit("log", {"level": level, "message": message})
+
+    crawler = UserPostsCrawler(
+        config=crawler_config,
+        on_page_complete=on_page_complete,
+        on_log=on_log,
+    )
+
+    from AutoCCF.utils import UserPaths
+    user_paths = UserPaths(output_dir, username)
+    apou_dir = str(user_paths.apou_dir)
+
+    try:
+        posts = asyncio.run(crawler.crawl(
+            username=username,
+            output_dir=apou_dir,
+        ))
+        emit("result", {
+            "success": True,
+            "posts_count": len(posts),
+            "output_file": str(user_paths.posts_file),
+        })
+    except Exception as e:
+        emit("error", {"code": "APOU_ERROR", "message": str(e)})
+
+
+def handle_dopj_crawl(payload: dict) -> None:
+    """执行 DoPJ 爬取"""
+    from DoPJ.cli import DoPJRunner
+    from AutoCCF.config import ConfigManager
+
+    user_file = payload.get("user_file", "")
+    threads = payload.get("threads", 3)
+
+    if not user_file:
+        emit("error", {"code": "INVALID_PAYLOAD", "message": "缺少 user_file 参数"})
+        return
+
+    cm = ConfigManager()
+    config = cm.load()
+    if not config or not config.accounts:
+        emit("error", {"code": "NO_ACCOUNTS", "message": "未配置账户"})
+        return
+
+    accounts = [{"name": a.name, "bduss": a.bduss} for a in config.accounts]
+
+    def on_progress(message: str, level: str = "info") -> None:
+        emit("log", {"level": level, "message": message})
+
+    try:
+        runner = DoPJRunner(
+            input_file=user_file,
+            accounts=accounts,
+            threads=min(threads, len(accounts)),
+            output_dir=os.path.dirname(user_file),
+            on_log=on_progress,
+        )
+        runner.run()
+        stats = runner.get_stats()
+        emit("result", {
+            "success": True,
+            "stats": stats,
+        })
+    except Exception as e:
+        emit("error", {"code": "DOPJ_ERROR", "message": str(e)})
+
+
+def handle_users_list(payload: dict) -> None:
+    """列出已爬取的用户"""
+    from AutoCCF.config import ConfigManager
+    cm = ConfigManager()
+    config = cm.load()
+    database_dir = config.database_dir if config else "./database"
+
+    users = []
+    if os.path.isdir(database_dir):
+        for name in os.listdir(database_dir):
+            user_dir = os.path.join(database_dir, name)
+            if os.path.isdir(user_dir):
+                posts_file = os.path.join(user_dir, "apou", "posts.json")
+                has_posts = os.path.exists(posts_file)
+                posts_count = 0
+                if has_posts:
+                    try:
+                        with open(posts_file, "r", encoding="utf-8") as f:
+                            data = json.load(f)
+                            posts_count = len(data.get("posts", data if isinstance(data, list) else []))
+                    except (json.JSONDecodeError, OSError):
+                        pass
+                users.append({
+                    "username": name,
+                    "has_posts": has_posts,
+                    "posts_count": posts_count,
+                })
+    emit("result", {"success": True, "users": users})
+
+
+def handle_users_detail(payload: dict) -> None:
+    """获取用户详情"""
+    username = payload.get("username", "")
+    if not username:
+        emit("error", {"code": "INVALID_PAYLOAD", "message": "缺少 username 参数"})
+        return
+
+    from AutoCCF.config import ConfigManager
+    from AutoCCF.utils import UserPaths
+    cm = ConfigManager()
+    config = cm.load()
+    database_dir = config.database_dir if config else "./database"
+    user_paths = UserPaths(database_dir, username)
+
+    detail = {"username": username, "posts": [], "has_dopj": False}
+
+    # 加载 APoU 数据
+    if user_paths.posts_file.exists():
+        try:
+            with open(user_paths.posts_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                detail["posts"] = data.get("posts", data if isinstance(data, list) else [])
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    # 检查 DoPJ 数据
+    detail["has_dopj"] = user_paths.dopj_dir.exists()
+
+    emit("result", {"success": True, "detail": detail})
+
+
+# Action 路由表
+ACTION_HANDLERS = {
+    "config:load": handle_config_load,
+    "config:save": handle_config_save,
+    "apou:crawl": handle_apou_crawl,
+    "dopj:crawl": handle_dopj_crawl,
+    "users:list": handle_users_list,
+    "users:detail": handle_users_detail,
+}
+
+
+def main() -> None:
+    """主入口：读取 stdin JSON，路由到处理函数"""
+    try:
+        raw_input = sys.stdin.read().strip()
+        if not raw_input:
+            emit("error", {"code": "EMPTY_INPUT", "message": "未收到输入"})
+            return
+
+        try:
+            request = json.loads(raw_input)
+        except json.JSONDecodeError as e:
+            emit("error", {"code": "INVALID_JSON", "message": f"JSON 解析失败: {e}"})
+            return
+
+        action = request.get("action", "")
+        payload = request.get("payload", {})
+
+        handler = ACTION_HANDLERS.get(action)
+        if handler is None:
+            emit("error", {"code": "UNKNOWN_ACTION", "message": f"未知操作: {action}"})
+            return
+
+        handler(payload)
+    except Exception as e:
+        emit("error", {"code": "INTERNAL_ERROR", "message": f"内部错误: {e}"})
+
+
+if __name__ == "__main__":
+    main()
+```
+
+- [ ] **步骤 4：运行测试验证通过**
+
+```bash
+python -m pytest tests/test_bridge/test_bridge.py -v
+```
+
+预期：3/3 PASS
+
+- [ ] **步骤 5：Commit**
+
+```bash
+git add electron/bridge.py tests/test_bridge/
+git commit -m "feat: 实现 Python bridge 通信层"
+```
+
+---
+
+## 任务 3：Electron IPC 集成
+
+**文件：**
+- 修改：`electron/main.js`
+- 修改：`electron/preload.js`
+
+- [ ] **步骤 1：在 main.js 中添加 IPC handler**
+
+在 `main.js` 中添加 `ipcMain.handle('bridge:invoke', ...)` 处理函数：
+- 接收 `{ action, payload }` 参数
+- `child_process.spawn('python', ['bridge.py'])` 启动 Python
+- 将 JSON 写入 stdin
+- 逐行读取 stdout，解析 NDJSON
+- `progress` 和 `log` 事件通过 `webContents.send()` 推送到 renderer
+- `result` 或 `error` 作为 Promise 返回值
+- 处理进程超时（60秒）和异常退出
+
+- [ ] **步骤 2：在 preload.js 中暴露 API**
+
+```javascript
+const { contextBridge, ipcRenderer } = require('electron');
+
+contextBridge.exposeInMainWorld('api', {
+  invoke: (action, payload) => ipcRenderer.invoke('bridge:invoke', { action, payload }),
+  onProgress: (callback) => {
+    ipcRenderer.on('bridge:progress', (_event, data) => callback(data));
+  },
+  onLog: (callback) => {
+    ipcRenderer.on('bridge:log', (_event, data) => callback(data));
+  },
+  removeAllListeners: (channel) => {
+    ipcRenderer.removeAllListeners(channel);
+  },
+});
+```
+
+- [ ] **步骤 3：手动验证 IPC 通信**
+
+在 `renderer/index.html` 中添加临时测试按钮：
+```html
+<button onclick="testBridge()">测试 Bridge</button>
+<pre id="output"></pre>
+<script>
+async function testBridge() {
+  const result = await window.api.invoke('config:load', {});
+  document.getElementById('output').textContent = JSON.stringify(result, null, 2);
+}
+</script>
+```
+
+```bash
+cd electron && npx electron .
+```
+
+预期：点击按钮后显示 config:load 的 JSON 响应
+
+- [ ] **步骤 4：Commit**
+
+```bash
+git add electron/main.js electron/preload.js electron/renderer/index.html
+git commit -m "feat: 实现 Electron IPC bridge 通信"
+```
+
+---
+
+## 任务 4：CSS 样式系统
+
+**文件：**
+- 创建：`electron/renderer/styles/reset.css`
+- 创建：`electron/renderer/styles/variables.css`
+- 创建：`electron/renderer/styles/layout.css`
+- 创建：`electron/renderer/styles/components.css`
+
+- [ ] **步骤 1：创建 reset.css**
+
+使用标准 CSS reset（box-sizing, margin/padding reset, 字体 smoothing）。
+
+- [ ] **步骤 2：创建 variables.css**
+
+定义 CSS 自定义属性（规格 4.2 节的配色方案）：
+
+```css
+:root {
+  /* 主色 */
+  --color-primary: #2563EB;
+  --color-primary-hover: #1D4ED8;
+  /* 背景 */
+  --color-bg: #F8FAFC;
+  --color-card: #FFFFFF;
+  /* 文字 */
+  --color-text: #1E293B;
+  --color-text-secondary: #64748B;
+  /* 状态 */
+  --color-success: #16A34A;
+  --color-warning: #D97706;
+  --color-error: #DC2626;
+  /* 边框 */
+  --color-border: #E2E8F0;
+  /* 侧边栏 */
+  --color-sidebar-bg: #1E293B;
+  --color-sidebar-text: #CBD5E1;
+  --color-sidebar-active: #FFFFFF;
+  /* 间距 */
+  --space-xs: 4px;
+  --space-sm: 8px;
+  --space-md: 16px;
+  --space-lg: 24px;
+  --space-xl: 32px;
+  /* 圆角 */
+  --radius-sm: 4px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  /* 阴影 */
+  --shadow-sm: 0 1px 3px rgba(0,0,0,0.1);
+  --shadow-md: 0 4px 6px rgba(0,0,0,0.1);
+  /* 字体 */
+  --font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif;
+  --font-size-sm: 13px;
+  --font-size-md: 14px;
+  --font-size-lg: 16px;
+  --font-size-xl: 20px;
+  --font-size-2xl: 24px;
+}
+```
+
+- [ ] **步骤 3：创建 layout.css**
+
+实现侧边栏 + 内容区布局：
+- `body`: `display: flex; height: 100vh;`
+- `.sidebar`: `width: 200px; background: var(--color-sidebar-bg);`
+- `.main-content`: `flex: 1; overflow-y: auto; background: var(--color-bg);`
+- 侧边栏导航项样式（未选中/选中/悬停）
+- 页面标题区
+- 状态栏
+
+- [ ] **步骤 4：创建 components.css**
+
+实现组件样式：
+- `.card`: 卡片容器（背景白、圆角 8px、阴影）
+- `.btn`, `.btn-primary`, `.btn-danger`: 按钮（扁平化、无边框、圆角）
+- `.input`, `.select`: 输入框/下拉框
+- `.slider`: 滑块
+- `.table`: 表格（斑马纹、hover 效果）
+- `.progress-bar`: 进度条
+- `.badge`: 状态标签（成功/警告/错误）
+- `.log-viewer`: 日志显示区（等宽字体、深色背景）
+- `.tab-bar`, `.tab-item`: 标签页
+
+- [ ] **步骤 5：更新 index.html 引入样式表**
+
+```html
+<link rel="stylesheet" href="styles/reset.css">
+<link rel="stylesheet" href="styles/variables.css">
+<link rel="stylesheet" href="styles/layout.css">
+<link rel="stylesheet" href="styles/components.css">
+```
+
+- [ ] **步骤 6：验证样式渲染**
+
+```bash
+cd electron && npx electron .
+```
+
+预期：窗口显示侧边栏 + 内容区布局，样式扁平化
+
+- [ ] **步骤 7：Commit**
+
+```bash
+git add electron/renderer/styles/
+git commit -m "feat: 实现扁平化 CSS 样式系统"
+```
+
+---
+
+## 任务 5：应用路由和 API 封装
+
+**文件：**
+- 创建：`electron/renderer/js/app.js`
+- 创建：`electron/renderer/js/api.js`
+- 修改：`electron/renderer/index.html`
+
+- [ ] **步骤 1：创建 api.js**
+
+封装 `window.api` 调用：
+
+```javascript
+// api.js - window.api 封装层
+export const api = {
+  config: {
+    load: () => window.api.invoke('config:load', {}),
+    save: (config) => window.api.invoke('config:save', config),
+  },
+  apou: {
+    crawl: (username) => window.api.invoke('apou:crawl', { username }),
+  },
+  dopj: {
+    crawl: (userFile, threads) => window.api.invoke('dopj:crawl', { user_file: userFile, threads }),
+  },
+  users: {
+    list: () => window.api.invoke('users:list', {}),
+    detail: (username) => window.api.invoke('users:detail', { username }),
+  },
+  onProgress: (callback) => window.api.onProgress(callback),
+  onLog: (callback) => window.api.onLog(callback),
+};
+```
+
+- [ ] **步骤 2：创建 app.js**
+
+实现单页路由：
+- `Router` 类：管理视图切换
+- `registerView(name, renderFn)`: 注册视图
+- `navigate(name, params)`: 导航到视图
+- 侧边栏点击事件绑定
+- 初始加载首页
+
+```javascript
+// app.js - 应用入口
+class Router {
+  constructor() {
+    this.views = {};
+    this.currentView = null;
+    this.container = document.getElementById('content');
+  }
+
+  register(name, viewModule) {
+    this.views[name] = viewModule;
+  }
+
+  async navigate(name, params = {}) {
+    // 清理当前视图
+    if (this.currentView && this.views[this.currentView]?.unmount) {
+      this.views[this.currentView].unmount();
+    }
+    // 更新侧边栏选中状态
+    document.querySelectorAll('.nav-item').forEach(item => {
+      item.classList.toggle('active', item.dataset.view === name);
+    });
+    // 渲染新视图
+    this.container.innerHTML = '';
+    this.currentView = name;
+    if (this.views[name]?.mount) {
+      await this.views[name].mount(this.container, params);
+    }
+  }
+}
+```
+
+- [ ] **步骤 3：更新 index.html 结构**
+
+完善 HTML 结构，包含：
+- 侧边栏导航（首页/APoU/DoPJ/用户/设置）
+- `<div id="content">` 内容容器
+- 状态栏
+- `<script type="module" src="js/app.js">` 入口
+
+- [ ] **步骤 4：验证路由切换**
+
+```bash
+cd electron && npx electron .
+```
+
+预期：侧边栏点击切换视图，选中状态高亮
+
+- [ ] **步骤 5：Commit**
+
+```bash
+git add electron/renderer/js/ electron/renderer/index.html
+git commit -m "feat: 实现应用路由和 API 封装层"
+```
+
+---
+
+## 任务 6：首页视图
+
+**文件：**
+- 创建：`electron/renderer/js/views/home.js`
+
+- [ ] **步骤 1：实现首页**
+
+首页包含：
+- 页面标题："首页"
+- 统计卡片行（3 列）：已爬取用户数、帖子总数、最近活动时间
+- 快捷操作区：两个大按钮卡片（开始 APoU、开始 DoPJ），点击后导航到对应视图
+- 通过 `api.users.list()` 获取统计数据
+
+```javascript
+export function mount(container, params) {
+  // 渲染统计卡片
+  // 绑定快捷操作按钮事件
+}
+export function unmount() {
+  // 清理事件监听
+}
+```
+
+- [ ] **步骤 2：验证首页渲染**
+
+```bash
+cd electron && npx electron .
+```
+
+预期：首页显示统计卡片和快捷操作按钮
+
+- [ ] **步骤 3：Commit**
+
+```bash
+git add electron/renderer/js/views/home.js
+git commit -m "feat: 实现首页视图"
+```
+
+---
+
+## 任务 7：APoU 视图
+
+**文件：**
+- 创建：`electron/renderer/js/views/apou.js`
+
+- [ ] **步骤 1：实现 APoU 视图**
+
+APoU 视图包含：
+- 页面标题："用户发言列表爬取 (APoU)"
+- 用户名输入框 + "开始爬取" 按钮
+- 配置区卡片：页面延迟滑块 (0.5-10s)、最大重试次数滑块 (1-10)
+- 进度区卡片：进度条 + 状态文字（初始隐藏，爬取时显示）
+- 实时日志区卡片：`.log-viewer` 滚动区域
+
+功能：
+- 点击"开始爬取"→ 调用 `api.apou.crawl(username)`
+- 监听 `api.onProgress()` 更新进度条
+- 监听 `api.onLog()` 追加日志
+- 爬取完成后显示结果统计
+- 爬取中禁用按钮，显示"停止"选项
+
+- [ ] **步骤 2：验证 APoU 视图**
+
+```bash
+cd electron && npx electron .
+```
+
+预期：APoU 视图显示所有控件，输入用户名可触发爬取
+
+- [ ] **步骤 3：Commit**
+
+```bash
+git add electron/renderer/js/views/apou.js
+git commit -m "feat: 实现 APoU 爬取视图"
+```
+
+---
+
+## 任务 8：DoPJ 视图
+
+**文件：**
+- 创建：`electron/renderer/js/views/dopj.js`
+
+- [ ] **步骤 1：实现 DoPJ 视图**
+
+DoPJ 视图包含：
+- 页面标题："帖子详情爬取 (DoPJ)"
+- 用户选择下拉框（从 `api.users.list()` 填充已爬取用户）
+- 配置区卡片：线程数滑块 (1-10)、最大重试次数滑块 (1-10)、最小间隔滑块 (0.5-10s)
+- 账户状态表：显示每个 BDUSS 账户名 + 状态标签
+- 进度区卡片：进度条 + 成功/失败/跳过统计
+- 实时日志区
+
+功能：
+- 选择用户后，自动定位其 posts.json 路径
+- 点击"开始爬取"→ 调用 `api.dopj.crawl(userFile, threads)`
+- 监听进度和日志事件
+- 账户状态表从 `api.config.load()` 获取账户列表
+
+- [ ] **步骤 2：验证 DoPJ 视图**
+
+```bash
+cd electron && npx electron .
+```
+
+预期：DoPJ 视图显示用户下拉框和配置控件
+
+- [ ] **步骤 3：Commit**
+
+```bash
+git add electron/renderer/js/views/dopj.js
+git commit -m "feat: 实现 DoPJ 爬取视图"
+```
+
+---
+
+## 任务 9：用户列表和详情视图
+
+**文件：**
+- 创建：`electron/renderer/js/views/users.js`
+- 创建：`electron/renderer/js/views/user-detail.js`
+
+- [ ] **步骤 1：实现用户列表视图**
+
+用户列表包含：
+- 页面标题："用户管理"
+- 搜索框（即时过滤表格）
+- 用户表格：用户名 | 帖子数 | DoPJ 状态 | 操作
+- 操作列："查看详情" 按钮 → 导航到 user-detail 视图
+- 通过 `api.users.list()` 加载数据
+
+- [ ] **步骤 2：实现用户详情视图**
+
+用户详情包含：
+- 返回按钮 → 回到用户列表
+- 用户信息头部：用户名、帖子数统计
+- 标签页切换：帖子列表 / 主题列表
+- 帖子表格：标题 | 贴吧 | 时间 | 链接
+- 通过 `api.users.detail(username)` 加载数据
+
+- [ ] **步骤 3：验证用户视图**
+
+```bash
+cd electron && npx electron .
+```
+
+预期：用户列表显示表格，点击查看详情能导航并显示帖子列表
+
+- [ ] **步骤 4：Commit**
+
+```bash
+git add electron/renderer/js/views/users.js electron/renderer/js/views/user-detail.js
+git commit -m "feat: 实现用户列表和详情视图"
+```
+
+---
+
+## 任务 10：设置视图
+
+**文件：**
+- 创建：`electron/renderer/js/views/settings.js`
+
+- [ ] **步骤 1：实现设置视图**
+
+设置视图包含：
+- 页面标题："设置"
+- 数据库目录配置卡片：路径显示 + "选择目录" 按钮
+- 账户管理卡片：
+  - 账户列表表格（名称 | BDUSS 预览 | 操作）
+  - "添加账户" 按钮 → 展开表单（名称、BDUSS 输入框）
+  - 编辑/删除按钮
+- APoU 配置卡片：页面延迟滑块、最大重试次数滑块
+- DoPJ 配置卡片：线程数、最大重试、最小间隔、最大失败数 滑块
+- 底部操作栏："保存设置" / "重置" 按钮
+
+功能：
+- 页面加载时调用 `api.config.load()` 填充所有字段
+- "保存设置" → 调用 `api.config.save(formData)`
+- 显示保存成功/失败提示
+
+注意：目录选择器需要通过 IPC 调用 Electron 的 `dialog.showOpenDialog()`，需要在 main.js 中添加 `ipcMain.handle('dialog:openDirectory')` 并在 preload.js 中暴露。
+
+- [ ] **步骤 2：更新 main.js 和 preload.js 添加目录选择器**
+
+main.js 添加：
+```javascript
+ipcMain.handle('dialog:openDirectory', async () => {
+  const result = await dialog.showOpenDialog({ properties: ['openDirectory'] });
+  return result.filePaths[0] || null;
+});
+```
+
+preload.js 添加：
+```javascript
+selectDirectory: () => ipcRenderer.invoke('dialog:openDirectory'),
+```
+
+- [ ] **步骤 3：验证设置视图**
+
+```bash
+cd electron && npx electron .
+```
+
+预期：设置页面加载配置，修改后可保存
+
+- [ ] **步骤 4：Commit**
+
+```bash
+git add electron/renderer/js/views/settings.js electron/main.js electron/preload.js
+git commit -m "feat: 实现设置视图和目录选择器"
+```
+
+---
+
+## 任务 11：E2E Payload 测试
+
+**文件：**
+- 创建：`tests/test_e2e/__init__.py`
+- 创建：`tests/test_e2e/test_payload.py`
+
+- [ ] **步骤 1：编写 APoU payload 测试**
+
+```python
+# tests/test_e2e/test_payload.py
+"""
+E2E Payload 测试 — 使用用户 ID '团子传说' 验证完整流程
+
+需要有效的 config.json 配置（包含 BDUSS 账户）。
+如果配置不存在或 BDUSS 无效，测试将被跳过。
+"""
+import json
+import os
+import subprocess
+import sys
+import pytest
+
+BRIDGE_PATH = os.path.join(os.path.dirname(__file__), '..', '..', 'electron', 'bridge.py')
+TARGET_USERNAME = "团子传说"
+
+def run_bridge(action: str, payload: dict, timeout: int = 120) -> list[dict]:
+    """运行 bridge.py 并收集响应"""
+    request = json.dumps({"action": action, "payload": payload})
+    proc = subprocess.run(
+        [sys.executable, BRIDGE_PATH],
+        input=request,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+    )
+    responses = []
+    for line in proc.stdout.strip().splitlines():
+        if line.strip():
+            responses.append(json.loads(line))
+    return responses
+
+def has_valid_config() -> bool:
+    """检查是否有有效配置"""
+    try:
+        results = run_bridge("config:load", {}, timeout=10)
+        if results and results[-1].get("type") == "result":
+            data = results[-1].get("data", {})
+            return data.get("success", False) and len(data.get("config", {}).get("accounts", [])) > 0
+    except Exception:
+        pass
+    return False
+
+@pytest.mark.skipif(not has_valid_config(), reason="需要有效的 config.json 配置")
+class TestAPoUPayload:
+    """APoU 爬取 payload 测试"""
+
+    def test_apou_crawl_returns_posts(self):
+        """测试 APoU 爬取 '团子传说' 用户的发言"""
+        results = run_bridge("apou:crawl", {"username": TARGET_USERNAME}, timeout=120)
+
+        # 应该有 progress 事件
+        progress_events = [r for r in results if r["type"] == "progress"]
+        assert len(progress_events) > 0, "应该收到 progress 事件"
+
+        # 最后一条应该是 result
+        last = results[-1]
+        assert last["type"] == "result", f"最后一条应该是 result，实际为: {last}"
+        assert last["data"]["success"] is True
+        assert last["data"]["posts_count"] > 0, "应该爬取到帖子"
+        assert "output_file" in last["data"]
+
+@pytest.mark.skipif(not has_valid_config(), reason="需要有效的 config.json 配置")
+class TestUsersPayload:
+    """用户列表 payload 测试（在 APoU 爬取后运行）"""
+
+    def test_users_list_contains_target(self):
+        """测试用户列表包含目标用户"""
+        results = run_bridge("users:list", {})
+        last = results[-1]
+        assert last["type"] == "result"
+        users = last["data"]["users"]
+        usernames = [u["username"] for u in users]
+        # 注意：此测试假设 APoU 测试已先运行
+        # 如果数据库中没有该用户，测试会跳过
+        if TARGET_USERNAME not in usernames:
+            pytest.skip(f"数据库中没有用户 '{TARGET_USERNAME}'")
+
+    def test_user_detail_has_posts(self):
+        """测试用户详情包含帖子数据"""
+        results = run_bridge("users:detail", {"username": TARGET_USERNAME})
+        last = results[-1]
+        if last["type"] == "error":
+            pytest.skip("用户数据不存在")
+        assert last["type"] == "result"
+        detail = last["data"]["detail"]
+        assert detail["username"] == TARGET_USERNAME
+```
+
+- [ ] **步骤 2：运行 E2E 测试**
+
+```bash
+cd .worktrees/electron-migration
+python -m pytest tests/test_e2e/test_payload.py -v --timeout=180
+```
+
+预期：如果有有效 config.json，APoU 爬取成功并返回帖子；否则测试被跳过
+
+- [ ] **步骤 3：Commit**
+
+```bash
+git add tests/test_e2e/
+git commit -m "test: 添加 E2E payload 测试（团子传说）"
+```
+
+---
+
+## 任务 12：集成验证和清理
+
+**文件：**
+- 修改：`electron/renderer/index.html`（移除临时测试代码）
+- 可能修改：所有视图文件（修复集成问题）
+
+- [ ] **步骤 1：移除临时测试代码**
+
+从 `index.html` 中移除任务 3 的临时测试按钮和脚本。
+
+- [ ] **步骤 2：完整启动测试**
+
+```bash
+cd electron && npx electron .
+```
+
+预期：
+- 首页显示统计数据
+- 侧边栏导航切换 6 个视图
+- APoU 视图可输入用户名并触发爬取
+- DoPJ 视图可选择用户并触发爬取
+- 用户列表显示已爬取用户
+- 设置页面可加载/保存配置
+
+- [ ] **步骤 3：运行所有测试**
+
+```bash
+python -m pytest tests/test_bridge/ -v
+python -m pytest tests/test_e2e/test_payload.py -v --timeout=180
+```
+
+预期：所有测试通过（或 E2E 测试因缺少配置被跳过）
+
+- [ ] **步骤 4：Commit**
+
+```bash
+git add -A
+git commit -m "chore: 集成验证和清理临时测试代码"
+```
+
+---
+
+## 依赖关系
+
+```
+任务 1 (脚手架)
+  └→ 任务 2 (Bridge)
+  └→ 任务 3 (IPC) ← 依赖任务 2
+  └→ 任务 4 (CSS)
+  └→ 任务 5 (路由/API) ← 依赖任务 3, 4
+      └→ 任务 6 (首页) ← 依赖任务 5
+      └→ 任务 7 (APoU) ← 依赖任务 5
+      └→ 任务 8 (DoPJ) ← 依赖任务 5
+      └→ 任务 9 (用户) ← 依赖任务 5
+      └→ 任务 10 (设置) ← 依赖任务 5
+  └→ 任务 11 (E2E 测试) ← 依赖任务 2
+  └→ 任务 12 (集成验证) ← 依赖所有
+```
+
+注意：任务 1/2/4 可以并行执行（无依赖）。任务 6-10 必须在任务 5 之后，但它们之间可以串行（共享 UI 框架）。任务 11 只依赖任务 2（bridge.py），可以与 UI 任务并行。
