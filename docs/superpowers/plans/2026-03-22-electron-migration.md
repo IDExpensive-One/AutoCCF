@@ -1,4 +1,4 @@
-# Electron 迁移实现计划（修订版 v3.2）
+# Electron 迁移实现计划（修订版 v3.3）
 
 > **面向 AI 代理的工作者：** 必需子技能：使用 superpowers:subagent-driven-development（推荐）或 superpowers:executing-plans 逐任务实现此计划。步骤使用复选框（`- [ ]`）语法来跟踪进度。
 
@@ -90,6 +90,15 @@ module.exports = {
     ignore: [
       /\.git/,
       /node_modules\/\.cache/,
+    ],
+    extraResource: [
+      // Python bridge 和业务模块必须打包到 resources/ 下（asar 外），
+      // 否则 child_process.spawn 无法访问
+      '../bridge.py',
+      '../APoU',
+      '../DoPJ',
+      '../AutoCCF',
+      '../requirements.txt',
     ],
   },
   makers: [
@@ -355,7 +364,7 @@ def handle_apou_crawl(payload: dict) -> None:
         """每页完成回调 — posts_count 是当页获取的帖子数（非累计值），renderer 负责累加"""
         emit("progress", {
             "page": page_num,
-            "posts_in_page": posts_count,
+            "posts_count": posts_count,
             "message": f"第 {page_num} 页: 本页 {posts_count} 条",
         })
 
@@ -489,10 +498,23 @@ def handle_dopj_crawl(payload: dict) -> None:
 def handle_users_list(payload: dict) -> None:
     """列出已爬取的用户 — 使用 ConfigManager.list_users()，返回 'name' 字段（非 'username'）"""
     from AutoCCF.config import ConfigManager
+    import os
     cm = ConfigManager()
     cm.load()
     try:
-        users = cm.list_users()  # 返回 [{"name": ..., ...}]，注意字段是 "name" 不是 "username"
+        users = cm.list_users()  # 返回 [{"name": ..., "path": ..., ...}]，注意字段是 "name" 不是 "username"
+        # 为首页"最近活动时间"卡片补充 last_activity 字段
+        # ConfigManager.list_users() 不返回时间戳，通过用户目录的 mtime 派生
+        for user in users:
+            user_path = user.get("path", "")
+            if user_path and os.path.isdir(user_path):
+                try:
+                    mtime = os.path.getmtime(user_path)
+                    user["last_activity"] = mtime  # Unix timestamp，renderer 端格式化
+                except OSError:
+                    user["last_activity"] = None
+            else:
+                user["last_activity"] = None
         emit("result", {"success": True, "users": users})
     except Exception as e:
         emit("error", {"code": "USERS_LIST_ERROR", "message": str(e)})
@@ -520,7 +542,7 @@ def handle_users_detail(payload: dict) -> None:
     }
 
     if not user_dir.exists():
-        emit("result", {"success": True, "detail": result})
+        emit("result", {"success": True, **result})
         return
 
     # 1. 加载 posts（优先新路径 apou/posts.json，回退旧路径 posts.json）
@@ -599,7 +621,7 @@ def handle_users_detail(payload: dict) -> None:
     except OSError:
         pass
 
-    emit("result", {"success": True, "detail": result})
+    emit("result", {"success": True, **result})
 
 
 def handle_apou_outputs(payload: dict) -> None:
@@ -698,7 +720,11 @@ git commit -m "feat: 实现 Python bridge 通信层"
 - 判断方式：`app.isPackaged`
 
 **工作目录：**
-- Python bridge 进程的 `cwd` 设为项目根目录（`app.isPackaged ? process.resourcesPath : path.join(__dirname, '..')`），确保 `sys.path.insert(0, PROJECT_ROOT)` 能正确找到 `APoU/`、`DoPJ/`、`AutoCCF/` 模块
+- Python bridge 进程的 `cwd` 设为项目根目录：
+  - 开发模式：`path.join(__dirname, '..')`（electron/ 的上级目录即项目根）
+  - 生产模式：`process.resourcesPath`（extraResource 复制到此目录下，Python 模块目录 `APoU/`、`DoPJ/`、`AutoCCF/` 都在此）
+  - 判断方式：`app.isPackaged`
+- 确保 `sys.path.insert(0, PROJECT_ROOT)` 能正确找到 `APoU/`、`DoPJ/`、`AutoCCF/` 模块
 
 **IPC handler 逻辑：**
 - 接收 `{ action, payload }` 参数
@@ -707,8 +733,9 @@ git commit -m "feat: 实现 Python bridge 通信层"
 - 逐行读取 stdout，解析 NDJSON
 - `progress` 和 `log` 事件通过 `webContents.send()` 推送到 renderer
 - `result` 或 `error` 作为 Promise 返回值
-- **不设固定超时** — 爬取操作（`apou:crawl`、`dopj:crawl`）可能运行数十分钟；仅对非爬取操作（`config:load`、`config:save`、`users:list`、`users:detail`、`apou:outputs`）设置 30 秒超时
-- 处理进程异常退出（非零退出码 → reject Promise with error）
+- **超时设置（与 spec 一致）：** APoU 操作（`apou:crawl`）设置 300 秒超时；DoPJ 操作（`dopj:crawl`）不设超时（取决于任务量）；非爬取操作（`config:load`、`config:save`、`users:list`、`users:detail`、`apou:outputs`）设置 30 秒超时
+- **stderr 缓冲：** 逐行收集 `child.stderr` 内容到数组中缓冲。当进程非零退出时，将缓冲的 stderr 内容包含在 Promise reject 的错误信息中，便于 renderer 显示 Python traceback 等诊断信息
+- 处理进程异常退出（非零退出码 → reject Promise with error，附带 stderr 缓冲内容）
 - **不实现取消功能**（V1 规格明确不做取消，见 spec 2.1 功能清单）
 
 - [ ] **步骤 2：在 preload.js 中暴露 API**
@@ -723,6 +750,9 @@ contextBridge.exposeInMainWorld('api', {
   },
   onLog: (callback) => {
     ipcRenderer.on('bridge:log', (_event, data) => callback(data));
+  },
+  onPythonUnavailable: (callback) => {
+    ipcRenderer.on('python:unavailable', (_event) => callback());
   },
   removeAllListeners: (channel) => {
     ipcRenderer.removeAllListeners(channel);
@@ -901,6 +931,7 @@ export const api = {
   },
   onProgress: (callback) => window.api.onProgress(callback),
   onLog: (callback) => window.api.onLog(callback),
+  onPythonUnavailable: (callback) => window.api.onPythonUnavailable(callback),
 };
 ```
 
@@ -912,6 +943,7 @@ export const api = {
 - `navigate(name, params)`: 导航到视图
 - 侧边栏点击事件绑定
 - 初始加载首页
+- **Python 不可用处理：** 注册 `api.onPythonUnavailable()` 监听器，收到事件后在 content 区域显示安装引导页面（提示用户安装 Python 3.10+，包含官方下载链接 `https://www.python.org/downloads/`），替换当前视图内容
 
 ```javascript
 // app.js - 应用入口
@@ -979,9 +1011,9 @@ git commit -m "feat: 实现应用路由和 API 封装层"
 
 首页包含：
 - 页面标题："首页"
-- 统计卡片行（3 列）：已爬取用户数、帖子总数、最近活动时间
+- 统计卡片行（3 列）：已爬取用户数、帖子总数、最近活动时间（从 `users:list` 响应中各用户的 `last_activity` 字段取最大值，格式化为相对时间如"2小时前"）
 - 快捷操作区：两个大按钮卡片（开始 APoU、开始 DoPJ），点击后导航到对应视图
-- 通过 `api.users.list()` 获取统计数据
+- 通过 `api.users.list()` 获取统计数据（响应包含 `last_activity` Unix 时间戳）
 
 ```javascript
 export function mount(container, params) {
@@ -1290,13 +1322,13 @@ class TestAPoUPayload:
         """测试 APoU 爬取 '团子传说' 用户的发言"""
         results = run_bridge("apou:crawl", {"username": TARGET_USERNAME}, timeout=120)
 
-        # 应该有 progress 事件（使用 page/posts_in_page 字段）
+        # 应该有 progress 事件（使用 page/posts_count 字段，与 spec 契约一致）
         progress_events = [r for r in results if r["type"] == "progress"]
         assert len(progress_events) > 0, "应该收到 progress 事件"
         # 验证 progress 事件格式
         for p in progress_events:
             assert "page" in p["data"], "progress 应包含 page 字段"
-            assert "posts_in_page" in p["data"], "progress 应包含 posts_in_page 字段（每页帖子数）"
+            assert "posts_count" in p["data"], "progress 应包含 posts_count 字段（每页帖子数）"
 
         # 最后一条应该是 result
         last = results[-1]
@@ -1392,10 +1424,11 @@ class TestUsersPayload:
         if last["type"] == "error":
             pytest.skip("用户数据不存在")
         assert last["type"] == "result"
-        detail = last["data"]["detail"]
-        assert detail["username"] == TARGET_USERNAME
+        # users:detail 返回顶级字段（与 spec schema 一致），不包裹在 "detail" 中
+        data = last["data"]
+        assert data["username"] == TARGET_USERNAME
         # 验证帖子是列表格式
-        assert isinstance(detail["posts"], list), "帖子应为列表格式"
+        assert isinstance(data["posts"], list), "帖子应为列表格式"
 ```
 
 - [ ] **步骤 2：运行 E2E 集成测试**
@@ -1619,6 +1652,28 @@ test('所有 5 个视图可渲染', async () => {
     expect(content.trim().length).toBeGreaterThan(0);
   }
 });
+
+test('user-detail 视图可通过导航渲染', async () => {
+  // user-detail 不在 sidebar 中，通过 users 列表项点击导航到达
+  const page = await app.firstWindow();
+  await page.click('[data-view="users"]');
+  // 如果有用户条目则点击进入详情；否则仅验证 users 视图已渲染
+  const userItem = page.locator('.user-item').first();
+  if (await userItem.isVisible({ timeout: 2000 }).catch(() => false)) {
+    await userItem.click();
+    await expect(page.locator('#content')).toContainText('帖子');  // user-detail 有"帖子"标签页
+  }
+});
+
+test('APoU 视图有 indeterminate 进度条', async () => {
+  // spec 要求验证 APoU indeterminate 进度条正确显示
+  const page = await app.firstWindow();
+  await page.click('[data-view="apou"]');
+  // 进度条初始应存在但隐藏（爬取未开始时）
+  const progressBar = page.locator('.progress-bar, progress');
+  // 验证进度元素存在于 DOM 中
+  await expect(progressBar.first()).toHaveCount(1);
+});
 ```
 
 - [ ] **步骤 2：安装 Playwright 依赖**
@@ -1636,7 +1691,7 @@ cd electron
 npx playwright test ../tests/test_ui/test_smoke.js
 ```
 
-预期：所有 5 个视图冒烟测试通过
+预期：所有 5 个侧边栏视图冒烟测试通过，user-detail 可选通过（取决于是否有用户数据），APoU 进度条元素存在
 
 - [ ] **步骤 4：Commit**
 
@@ -1664,8 +1719,9 @@ cd electron && npx electron .
 ```
 
 预期：
-- 首页显示统计数据
+- 首页显示统计数据（包含最近活动时间）
 - 侧边栏导航切换 5 个视图（首页、APoU、DoPJ、用户、设置）
+- 用户列表点击可导航到 user-detail 视图（第 6 个视图）
 - APoU 视图可输入用户名并触发爬取
 - DoPJ 视图可选择用户并触发爬取
 - 用户列表显示已爬取用户
