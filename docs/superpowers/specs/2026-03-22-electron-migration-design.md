@@ -70,9 +70,9 @@ AutoCCF 是百度贴吧爬虫工具集，采用两步式设计：APoU（获取�
 ### 2.2 Python 进程启动
 
 **解释器发现：**
-1. 首先尝试 `python3`（POSIX）/ `python`（Windows）
-2. 然后检查 `PATH` 中的可用 Python 解释器
-3. 如果失败，在 renderer 中显示友好错误提示，引导用户安装 Python 3.10+
+1. Windows: 依次尝试 `py -3`、`python`
+2. POSIX (macOS/Linux): 依次尝试 `python3`、`python`
+3. 如果所有候选都失败，在 renderer 中显示友好错误提示，引导用户安装 Python 3.10+
 
 **工作目录：** Python bridge 进程以项目根目录（`app.getAppPath()` 或其上级）为 `cwd`，确保 `sys.path.insert(0, PROJECT_ROOT)` 能正确找到 `APoU/`、`DoPJ/`、`AutoCCF/` 模块。
 
@@ -80,7 +80,7 @@ AutoCCF 是百度贴吧爬虫工具集，采用两步式设计：APoU（获取�
 
 **未安装 Python 时的 UX：** main.js 在 `app.whenReady()` 后执行一次 `python --version` 检查。若失败，创建窗口后通过 `webContents.send('python:unavailable')` 通知 renderer 显示安装引导页面（非错误弹窗）。
 
-### 2.2 安全模型
+### 2.3 安全模型
 
 | 配置项 | 值 | 原因 |
 |--------|-----|------|
@@ -129,11 +129,20 @@ def emit(msg_type: str, data: dict) -> None:
 | `config:load` | `{}` | 加载配置文件 | `result`（含完整 BDUSS） |
 | `config:save` | `{accounts, apou, dopj, database_dir}` | 保存配置 | `result` |
 | `apou:crawl` | `{username}` | 爬取用户发言列表 | `progress` + `log` + `result` |
-| `dopj:crawl` | `{input_json, threads}` | 爬取帖子详情 | `log` + `result` |
+| `dopj:crawl` | `{input_json, threads}` | 爬取帖子详情 | `progress` + `log` + `result` |
 | `users:list` | `{}` | 列出已爬取的用户 | `result` |
 | `users:detail` | `{username}` | 获取用户详情 | `result` |
+| `apou:outputs` | `{}` | 查找所有 APoU 输出文件 | `result` |
 
 **注意：** `config:load` 返回完整 BDUSS 值（非掩码）。BDUSS 掩码仅在 renderer 端展示时处理（`bduss.slice(0, 8) + "..."`），保证 settings 视图的 save round-trip 不会丢失数据。
+
+**配置与爬取参数的关系：** APoU/DoPJ 视图中的配置控件（页面延迟、最大重试次数、线程数、最小间隔等）**不通过 crawl action payload 传递**。工作流为：
+1. 用户在 APoU/DoPJ 视图或 Settings 视图中调整配置控件
+2. Renderer 调用 `config:save` 将修改后的配置持久化
+3. 用户点击"开始爬取"时，`apou:crawl` / `dopj:crawl` 仅传递必要的运行参数（`username` / `input_json + threads`）
+4. bridge.py 通过 `ConfigManager.load()` 读取最新持久化配置，从中提取 `CrawlerConfig` 和 `config_dict` 传给爬虫
+
+这样可以避免 payload 和持久化配置之间的不一致，同时保持 action contract 简洁。
 
 ### 3.4 响应格式 (Python stdout → Electron)
 
@@ -189,7 +198,8 @@ main.js 的 `ipcMain.handle('bridge:invoke')` 实现：
    - `type === "log"` → `win.webContents.send('bridge:log', data)`
    - `type === "result"` 或 `type === "error"` → 作为 Promise 的 resolve/reject 值
 5. 处理进程异常退出（`child.on('error')`, `child.on('exit')` 非零退出码）
-6. 超时设置：APoU 300 秒，DoPJ 无超时（取决于任务量）
+6. **stderr 缓冲**：`child.stderr` 逐行收集并缓冲。当进程异常退出时，将缓冲的 stderr 内容包含在 Promise reject 的错误信息中，便于 renderer 显示 Python traceback 等诊断信息
+7. 超时设置：APoU 300 秒，DoPJ 无超时（取决于任务量）
 
 ## 4. UI 设计
 
@@ -253,7 +263,7 @@ main.js 的 `ipcMain.handle('bridge:invoke')` 实现：
 
 - 用户名输入框 + "开始爬取"按钮
 - 配置区：页面延迟滑块、最大重试次数滑块
-- 进度区：进度条 + 百分比 + 当前状态文字
+- 进度区：indeterminate 进度条 + 实时计数（"已爬取 X 条帖子"）+ 当前状态文字
 - 实时日志区：滚动文本区域，显示爬取日志
 
 #### 4.4.3 DoPJ 视图
@@ -335,7 +345,7 @@ bridge.py
 │   └── .list_users() → List[Dict]        # 用户列表
 │   └── .find_apou_outputs() → List[Dict] # APoU 输出查找
 ├── AutoCCF.config.UnifiedConfig          # .save(path) → str
-│   └── .from_dict(data, path) → cls      # 从字典创建
+│   └── .from_dict(data, config_path) → cls  # 从字典创建
 │   └── .to_dict() → Dict                 # 序列化
 ├── AutoCCF.utils.UserPaths               # 用户数据路径
 ├── APoU.crawler.UserPostsCrawler         # APoU 爬虫
@@ -376,21 +386,53 @@ def on_page_complete(page_num: int, posts_count: int) -> None:
 3. 由于 DoPJ 使用多线程 + ThreadPoolExecutor，bridge.py 可通过定期轮询 stats 发送进度
 
 ```python
-# 简化方案：在 run() 完成后一次性报告结果
+# 监控执行方案：在后台线程运行 DoPJ，主线程定期轮询 stats 发送进度
+import threading
+
 runner.load_tasks()
-runner.run()
-stats = runner.task_manager.get_stats()
-emit("result", {"success": True, "stats": stats})
+initial_stats = runner.task_manager.get_stats()
+emit("progress", {"total": initial_stats["total"], "success": 0, "failed": 0,
+                   "message": f"开始处理 {initial_stats['total']} 个任务"})
+
+# 在后台线程运行 runner.run()
+run_thread = threading.Thread(target=runner.run, daemon=True)
+run_thread.start()
+
+# 主线程定期轮询进度
+while run_thread.is_alive():
+    run_thread.join(timeout=2.0)  # 每 2 秒检查一次
+    stats = runner.task_manager.get_stats()
+    completed = stats.get("success", 0) + stats.get("failed", 0) + stats.get("skipped", 0)
+    emit("progress", {
+        "total": stats.get("total", 0),
+        "success": stats.get("success", 0),
+        "failed": stats.get("failed", 0),
+        "message": f"{completed}/{stats.get('total', 0)} 完成",
+    })
+
+# 最终结果
+final_stats = runner.task_manager.get_stats()
+emit("result", {"success": True, "stats": final_stats})
 ```
+
+> **注意：** 不要使用一次性 `runner.run()` + 最终 `get_stats()` 的简化方案——这样 renderer 在整个 DoPJ 运行期间无法收到任何进度更新。
 
 ### 6.4 config:save 实现
 
 ```python
 def handle_config_save(payload: dict) -> None:
-    config = UnifiedConfig.from_dict(payload)
-    saved_path = config.save()  # 调用 UnifiedConfig.save()，非 ConfigManager.save()
+    # 先加载现有配置以保留 config_path
+    cm = ConfigManager()
+    existing = cm.load()  # 返回带有正确 _config_path 的 UnifiedConfig
+    original_path = existing.config_path  # 保留原始路径
+
+    # 从 payload 创建新配置，携带原始路径
+    config = UnifiedConfig.from_dict(payload, config_path=original_path)
+    saved_path = config.save()  # 使用 UnifiedConfig.save()，保存到原始路径
     emit("result", {"success": True, "path": saved_path})
 ```
+
+> **注意：** 直接 `UnifiedConfig.from_dict(payload).save()` 会因为缺少 `config_path` 而保存到默认路径，导致用户从非默认位置加载的配置丢失。必须先通过 `ConfigManager.load()` 获取原始路径。
 
 ### 6.5 users:list 实现
 
@@ -402,6 +444,125 @@ def handle_users_list(payload: dict) -> None:
     cm.load()
     users = cm.list_users()
     emit("result", {"success": True, "users": users})
+```
+
+### 6.6 apou:outputs 实现
+
+DoPJ 视图需要知道哪些用户已有 APoU 输出文件（即可供 DoPJ 爬取的 `posts.json`）。bridge.py 使用 `ConfigManager.find_apou_outputs()`（`AutoCCF/config.py:351`）获取所有已存在的 APoU 输出：
+
+```python
+def handle_apou_outputs(payload: dict) -> None:
+    cm = ConfigManager()
+    cm.load()
+    outputs = cm.find_apou_outputs()
+    # 返回格式: [{"username": "团子传说", "path": "/abs/path/posts.json", "posts_count": 142, "has_index": true}, ...]
+    emit("result", {"success": True, "outputs": outputs})
+```
+
+**DoPJ 视图使用场景：** DoPJ 视图的"用户选择下拉框"应调用 `apou:outputs` 获取可爬取的用户列表，其中 `path` 字段直接作为 `dopj:crawl` 的 `input_json` 参数。
+
+### 6.7 users:detail 实现
+
+`users:detail` 返回单个用户的完整数据，供 UserDetail 视图的三个标签页使用。响应 schema：
+
+```json
+{
+  "success": true,
+  "username": "团子传说",
+  "user_dir": "/abs/path/database/团子传说",
+  "posts": [{"tid": 123, "title": "...", "href": "..."}, ...],
+  "threads": [{"tid": 123, "title": "...", "status": "success"}, ...],
+  "files": [{"name": "apou", "is_dir": true, "size_text": "3 项"}, ...]
+}
+```
+
+**数据加载规则（兼容新旧路径）：**
+
+bridge.py 使用 `UnifiedConfig.get_user_dir(username)` 获取用户目录，然后按以下规则加载：
+
+1. **posts（发言列表）**：优先读取 `{user_dir}/apou/posts.json`，若不存在回退到 `{user_dir}/posts.json`。文件内容是顶级 JSON 数组。
+2. **threads（帖子详情列表）**：
+   - 优先读取 `{user_dir}/dopj/index.json`，从中提取 `entries` 数组构建 threads 列表（`tid`, `title`, `status`）
+   - 若无 index.json，扫描 `{user_dir}/dopj/` 目录中的数字命名子目录，读取 `{tid}/threads/{tid}/thread.json` 获取 title
+   - 旧版回退：扫描 `{user_dir}/threads/` 目录中的子目录，读取 `{tid}/thread.json`
+3. **files（文件浏览）**：列出 `{user_dir}` 根目录的文件和子目录，返回 `name`、`is_dir`、`size_text`（文件大小或子项数量）
+
+```python
+def handle_users_detail(payload: dict) -> None:
+    username = payload["username"]
+    cm = ConfigManager()
+    config = cm.load()
+    user_dir = config.get_user_dir(username)
+
+    result = {"username": username, "user_dir": str(user_dir), "posts": [], "threads": [], "files": []}
+
+    if not user_dir.exists():
+        emit("result", {"success": True, **result})
+        return
+
+    # 1. 加载 posts（优先新路径）
+    posts_file = user_dir / "apou" / "posts.json"
+    if not posts_file.exists():
+        posts_file = user_dir / "posts.json"
+    if posts_file.exists():
+        try:
+            with open(posts_file, "r", encoding="utf-8") as f:
+                result["posts"] = json.load(f)
+        except Exception:
+            pass
+
+    # 2. 加载 threads（优先 index.json → 扫描 dopj/ → 扫描 threads/）
+    index_file = user_dir / "dopj" / "index.json"
+    if not index_file.exists():
+        index_file = user_dir / "index.json"
+    if index_file.exists():
+        try:
+            with open(index_file, "r", encoding="utf-8") as f:
+                index = json.load(f)
+            result["threads"] = [
+                {"tid": e.get("tid"), "title": e.get("title"), "status": e.get("status", "pending")}
+                for e in index.get("entries", [])
+            ]
+        except Exception:
+            pass
+    else:
+        dopj_dir = user_dir / "dopj"
+        if dopj_dir.exists():
+            for tid_dir in dopj_dir.iterdir():
+                if tid_dir.is_dir() and tid_dir.name.isdigit():
+                    thread_file = tid_dir / "threads" / tid_dir.name / "thread.json"
+                    if thread_file.exists():
+                        try:
+                            with open(thread_file, "r", encoding="utf-8") as f:
+                                td = json.load(f)
+                            result["threads"].append({"tid": int(tid_dir.name), "title": td.get("title", "未知"), "status": "success"})
+                        except Exception:
+                            pass
+        else:
+            threads_dir = user_dir / "threads"
+            if threads_dir.exists():
+                for tid_dir in threads_dir.iterdir():
+                    if tid_dir.is_dir():
+                        thread_file = tid_dir / "thread.json"
+                        if thread_file.exists():
+                            try:
+                                with open(thread_file, "r", encoding="utf-8") as f:
+                                    td = json.load(f)
+                                result["threads"].append({"tid": int(tid_dir.name), "title": td.get("title", "未知"), "status": "success"})
+                            except Exception:
+                                pass
+
+    # 3. 文件浏览
+    for item in sorted(user_dir.iterdir()):
+        is_dir = item.is_dir()
+        if is_dir:
+            size_text = f"{len(list(item.iterdir()))} 项"
+        else:
+            size = item.stat().st_size
+            size_text = f"{size} B" if size < 1024 else (f"{size/1024:.1f} KB" if size < 1048576 else f"{size/1048576:.1f} MB")
+        result["files"].append({"name": item.name, "is_dir": is_dir, "size_text": size_text})
+
+    emit("result", {"success": True, **result})
 ```
 
 ## 7. 测试策略
