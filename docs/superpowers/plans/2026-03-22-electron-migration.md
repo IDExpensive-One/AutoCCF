@@ -451,6 +451,9 @@ def handle_dopj_crawl(payload: dict) -> None:
     try:
         # _BridgeCli 桩：将 DoPJRunner 的 CLI 调用转发为 NDJSON log 事件
         # DoPJRunner 内部的 if self.cli: 守卫会调用这些方法，而非裸 print()
+        # 注意：签名必须与 AutoCCF/cli.py CLI 类一致（positional args，非 **kw），
+        #       因为 DoPJRunner.load_tasks() 调用 cli.print_config([...])（positional），
+        #       DoPJRunner._print_final_stats() 调用 cli.print_stats_box(stats_items) 和 cli.print_footer("...")
         class _BridgeCli:
             """将 CLI 方法调用转发为 NDJSON log 事件"""
             def info(self, msg: str) -> None: emit("log", {"level": "info", "message": msg})
@@ -458,14 +461,14 @@ def handle_dopj_crawl(payload: dict) -> None:
             def error(self, msg: str) -> None: emit("log", {"level": "error", "message": msg})
             def success(self, msg: str) -> None: emit("log", {"level": "info", "message": msg})
             def progress(self, msg: str) -> None: emit("log", {"level": "info", "message": msg})
-            def print_section(self, title: str, **kw: object) -> None: pass
-            def print_config(self, **kw: object) -> None: pass
+            def print_section(self, title: str) -> None: pass
+            def print_config(self, items: list[tuple[str, str]]) -> None: pass
             def print_task(self, **kw: object) -> None: pass
             def print_progress_bar(self, **kw: object) -> None: pass
             def clear_line(self) -> None: pass
             def format_duration(self, seconds: float) -> str: return f"{seconds:.1f}s"
-            def print_stats_box(self, **kw: object) -> None: pass
-            def print_footer(self, **kw: object) -> None: pass
+            def print_stats_box(self, stats: list[tuple[str, str, str]]) -> None: pass
+            def print_footer(self, message: str = "") -> None: pass
 
         runner = DoPJRunner(
             input_json=input_json,  # 注意：参数名是 input_json 不是 input_file
@@ -1421,7 +1424,7 @@ class TestDoPJPayload:
         assert last["data"]["success"] is True
         stats = last["data"]["stats"]
         assert stats.get("total", 0) > 0, "应该有任务"
-        assert stats.get("success", 0) > 0, "至少有一个任务应成功完成"
+        assert stats.get("success", 0) + stats.get("skipped", 0) > 0, "至少有一个任务应成功完成或被跳过（增量模式）"
 
         # 验证 DoPJ 输出目录存在并包含 thread.json
         import glob
