@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog } = require('electron');
 const path = require('path');
 const { spawn, execFile } = require('child_process');
 const readline = require('readline');
@@ -183,6 +183,11 @@ ipcMain.handle('bridge:invoke', async (event, { action, payload }) => {
     child.stdin.write(JSON.stringify({ action, payload }));
     child.stdin.end();
   });
+});
+
+ipcMain.handle('dialog:openDirectory', async () => {
+  const result = await dialog.showOpenDialog({ properties: ['openDirectory'] });
+  return result.filePaths[0] || null;
 });
 
 app.whenReady().then(async () => {

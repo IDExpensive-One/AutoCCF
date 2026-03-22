@@ -4,6 +4,7 @@ import * as apouView from "./views/apou.js";
 import * as dopjView from "./views/dopj.js";
 import * as usersView from "./views/users.js";
 import * as userDetailView from "./views/user-detail.js";
+import * as settingsView from "./views/settings.js";
 
 const VIEW_TITLES = {
   home: "首页",
@@ -85,6 +86,11 @@ export function initApp() {
 
     if (name === "users") {
       router.register(name, usersView);
+      return;
+    }
+
+    if (name === "settings") {
+      router.register(name, settingsView);
       return;
     }
 

@@ -14,4 +14,5 @@ contextBridge.exposeInMainWorld('api', {
   removeAllListeners: (channel) => {
     ipcRenderer.removeAllListeners(channel);
   },
+  selectDirectory: () => ipcRenderer.invoke('dialog:openDirectory'),
 });
