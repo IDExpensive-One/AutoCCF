@@ -1,5 +1,6 @@
 import { api } from "./api.js";
 import * as homeView from "./views/home.js";
+import * as apouView from "./views/apou.js";
 
 const VIEW_TITLES = {
   home: "首页",
@@ -66,6 +67,11 @@ export function initApp() {
   Object.keys(VIEW_TITLES).forEach((name) => {
     if (name === "home") {
       router.register(name, homeView);
+      return;
+    }
+
+    if (name === "apou") {
+      router.register(name, apouView);
       return;
     }
 
