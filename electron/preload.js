@@ -1,4 +1,17 @@
-const { contextBridge } = require('electron');
+const { contextBridge, ipcRenderer } = require('electron');
 
-// 占位 — 后续任务会添加 IPC 方法
-contextBridge.exposeInMainWorld('api', {});
+contextBridge.exposeInMainWorld('api', {
+  invoke: (action, payload) => ipcRenderer.invoke('bridge:invoke', { action, payload }),
+  onProgress: (callback) => {
+    ipcRenderer.on('bridge:progress', (_event, data) => callback(data));
+  },
+  onLog: (callback) => {
+    ipcRenderer.on('bridge:log', (_event, data) => callback(data));
+  },
+  onPythonUnavailable: (callback) => {
+    ipcRenderer.on('python:unavailable', (_event) => callback());
+  },
+  removeAllListeners: (channel) => {
+    ipcRenderer.removeAllListeners(channel);
+  },
+});
