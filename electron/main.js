@@ -76,7 +76,10 @@ ipcMain.handle('bridge:invoke', async (event, { action, payload }) => {
     const child = spawn(
       pythonCommand,
       pythonCommand === 'py' ? ['-3', bridgePath] : [bridgePath],
-      { cwd: projectRoot },
+      {
+        cwd: projectRoot,
+        env: { ...process.env, PYTHONIOENCODING: 'utf-8' },
+      },
     );
     const stderrBuffer = [];
     let resolveValue = null;

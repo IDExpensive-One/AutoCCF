@@ -11,6 +11,12 @@ import os
 import asyncio
 from typing import Any, TextIO
 
+# ── 强制 UTF-8 编码（Windows 默认 GBK 会导致 Electron 端乱码）──
+for _stream_name in ("stdout", "stderr", "stdin"):
+    _stream = getattr(sys, _stream_name)
+    if hasattr(_stream, "reconfigure") and getattr(_stream, "encoding", "utf-8") != "utf-8":
+        _stream.reconfigure(encoding="utf-8")
+
 # 将项目根目录加入 sys.path
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, PROJECT_ROOT)

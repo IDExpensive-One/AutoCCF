@@ -104,3 +104,16 @@ electron/.playwright/
 # 其他
 *.bak
 *.orig
+
+# AI/Swarm 工作目录
+.claude/
+.swarm/
+
+# Playwright 测试结果
+test-results/
+
+# 截图
+*.png
+
+# Windows 下 "> nul" 意外创建的文件
+nul
