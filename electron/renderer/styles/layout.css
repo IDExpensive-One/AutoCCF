@@ -1,0 +1,90 @@
+body {
+  display: flex;
+  height: 100vh;
+  font-family: var(--font-family);
+  font-size: var(--font-size-md);
+  color: var(--color-text);
+  background: var(--color-bg);
+}
+
+.sidebar {
+  width: var(--sidebar-width);
+  background: var(--color-sidebar-bg);
+  color: var(--color-sidebar-text);
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+  box-shadow: var(--shadow-md);
+}
+
+.sidebar-header {
+  padding: var(--space-lg);
+  border-bottom: var(--border-width) solid color-mix(in srgb, var(--color-sidebar-text) 14%, transparent);
+}
+
+.sidebar-header h1 {
+  font-size: var(--font-size-xl);
+  font-weight: 700;
+  color: var(--color-sidebar-active);
+}
+
+.sidebar-nav {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+  padding: var(--space-md);
+}
+
+.nav-item {
+  display: block;
+  padding: var(--space-md);
+  border-radius: var(--radius-md);
+  color: inherit;
+  cursor: pointer;
+  transition: background-color 0.2s ease, color 0.2s ease;
+}
+
+.nav-item.active {
+  color: var(--color-sidebar-active);
+  background: color-mix(in srgb, var(--color-sidebar-active) 10%, transparent);
+}
+
+.nav-item:hover {
+  background: color-mix(in srgb, var(--color-sidebar-active) 5%, transparent);
+}
+
+.main-content {
+  flex: 1;
+  overflow-y: auto;
+  background: var(--color-bg);
+  display: flex;
+  flex-direction: column;
+}
+
+.content-header {
+  padding: var(--space-lg) var(--space-xl);
+  border-bottom: var(--border-width) solid var(--color-border);
+  background: color-mix(in srgb, var(--color-card) 88%, var(--color-bg));
+}
+
+.content-header h2 {
+  font-size: var(--font-size-2xl);
+  font-weight: 700;
+}
+
+.content-body {
+  flex: 1;
+  padding: var(--space-xl);
+  display: grid;
+  align-content: start;
+  gap: var(--space-lg);
+}
+
+.status-bar {
+  margin-top: auto;
+  padding: var(--space-sm) var(--space-xl);
+  border-top: var(--border-width) solid var(--color-border);
+  color: var(--color-text-secondary);
+  background: color-mix(in srgb, var(--color-card) 92%, var(--color-bg));
+}
