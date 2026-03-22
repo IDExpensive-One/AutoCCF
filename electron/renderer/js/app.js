@@ -1,4 +1,5 @@
 import { api } from "./api.js";
+import * as homeView from "./views/home.js";
 
 const VIEW_TITLES = {
   home: "首页",
@@ -57,10 +58,17 @@ export class Router {
   }
 }
 
+export let router = null;
+
 export function initApp() {
-  const router = new Router();
+  router = new Router();
 
   Object.keys(VIEW_TITLES).forEach((name) => {
+    if (name === "home") {
+      router.register(name, homeView);
+      return;
+    }
+
     router.register(name, createPlaceholderView(name));
   });
 

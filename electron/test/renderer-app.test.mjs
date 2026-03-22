@@ -44,12 +44,63 @@ class FakeNavItem {
 
 class FakeElement {
   constructor() {
-    this.innerHTML = "";
+    this._innerHTML = "";
     this.textContent = "";
+    this.listeners = new Map();
+    this.children = new Map();
+  }
+
+  set innerHTML(value) {
+    this._innerHTML = value;
+    this.children.clear();
+
+    if (value.includes('data-nav="apou"')) {
+      this.children.set('[data-nav="apou"]', new FakeActionElement("apou"));
+    }
+
+    if (value.includes('data-nav="dopj"')) {
+      this.children.set('[data-nav="dopj"]', new FakeActionElement("dopj"));
+    }
+  }
+
+  get innerHTML() {
+    return this._innerHTML;
+  }
+
+  querySelector(selector) {
+    return this.children.get(selector) || null;
+  }
+
+  addEventListener(type, listener) {
+    this.listeners.set(type, listener);
+  }
+
+  removeEventListener(type, listener) {
+    const current = this.listeners.get(type);
+    if (current === listener) {
+      this.listeners.delete(type);
+    }
+  }
+
+  dispatchClick(target) {
+    const listener = this.listeners.get("click");
+    if (listener) {
+      listener({ target, preventDefault() {} });
+    }
   }
 }
 
-function createEnvironment() {
+class FakeActionElement {
+  constructor(targetView) {
+    this.dataset = { nav: targetView };
+  }
+
+  closest() {
+    return this;
+  }
+}
+
+function createEnvironment(options = {}) {
   const content = new FakeElement();
   const header = new FakeElement();
   const navItems = [
@@ -88,6 +139,19 @@ function createEnvironment() {
     api: {
       invoke(action, payload) {
         invokeCalls.push({ action, payload });
+        if (action === "users:list") {
+          if (options.usersListError) {
+            return Promise.reject(new Error(options.usersListError));
+          }
+
+          return Promise.resolve({
+            success: true,
+            users: [
+              { name: "alice", posts_count: 3, last_activity: 1_699_992_800 },
+              { name: "bob", posts_count: 5, last_activity: null },
+            ],
+          });
+        }
         return Promise.resolve({ action, payload });
       },
       onProgress() {},
@@ -110,8 +174,10 @@ function createEnvironment() {
   };
 }
 
-test("renderer api wrapper and router placeholders work", async () => {
+test("renderer api wrapper and home view work", async () => {
   const env = createEnvironment();
+  const originalDateNow = Date.now;
+  Date.now = () => 1_700_000_000_000;
   const apiModuleUrl = pathToFileURL(
     path.resolve("Q:\\Document\\MySoftware\\AutoCCF\\.worktrees\\electron-migration\\electron\\renderer\\js\\api.js"),
   );
@@ -138,11 +204,25 @@ test("renderer api wrapper and router placeholders work", async () => {
     { action: "users:detail", payload: { username: "tester" } },
   ]);
 
-  await import(`${appModuleUrl.href}?app-test`);
+  await import(appModuleUrl.href);
 
   assert.equal(env.header.textContent, "首页");
-  assert.match(env.content.innerHTML, /首页 视图开发中/);
+  assert.match(env.content.innerHTML, /已爬取用户/);
+  assert.match(env.content.innerHTML, />2</);
+  assert.match(env.content.innerHTML, /帖子总数/);
+  assert.match(env.content.innerHTML, />8</);
+  assert.match(env.content.innerHTML, /最近活动/);
+  assert.match(env.content.innerHTML, /2小时前/);
+  assert.match(env.content.innerHTML, /开始 APoU/);
+  assert.match(env.content.innerHTML, /开始 DoPJ/);
   assert.equal(env.navItems[0].classList.contains("active"), true);
+
+  env.content.dispatchClick(env.content.querySelector('[data-nav="apou"]'));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  assert.equal(env.header.textContent, "APoU");
+  assert.match(env.content.innerHTML, /APoU 视图开发中/);
+  assert.equal(env.navItems[1].classList.contains("active"), true);
 
   env.navItems[2].click();
   await new Promise((resolve) => setTimeout(resolve, 0));
@@ -155,4 +235,20 @@ test("renderer api wrapper and router placeholders work", async () => {
   env.triggerPythonUnavailable();
   assert.match(env.content.innerHTML, /Python 未找到/);
   assert.match(env.content.innerHTML, /下载 Python/);
+
+  Date.now = originalDateNow;
+});
+
+test("home view shows error state when users list fails", async () => {
+  const env = createEnvironment({ usersListError: "接口异常" });
+  const appModuleUrl = pathToFileURL(
+    path.resolve("Q:\\Document\\MySoftware\\AutoCCF\\.worktrees\\electron-migration\\electron\\renderer\\js\\app.js"),
+  );
+
+  const { initApp } = await import(appModuleUrl.href);
+  initApp();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  assert.equal(env.header.textContent, "首页");
+  assert.match(env.content.innerHTML, /加载失败：接口异常/);
 });
