@@ -2,10 +2,16 @@
 const { test, expect, _electron: electron } = require('@playwright/test');
 const path = require('path');
 
+// Electron 安装在 electron/node_modules 下，通过模块入口获取可执行文件路径（跨平台）
+const electronExe = require(
+  path.join(__dirname, '..', '..', 'electron', 'node_modules', 'electron'),
+);
+
 let app;
 
 test.beforeAll(async () => {
   app = await electron.launch({
+    executablePath: electronExe,
     args: [path.join(__dirname, '..', '..', 'electron', 'main.js')],
   });
 });
