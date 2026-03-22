@@ -1,144 +1,135 @@
 """
 数据解析器
-解析 API 返回的原始数据，提取帖子信息
+将 aiotieba 返回的数据结构转换为统一的 Post 对象
 """
-import re
 from dataclasses import dataclass, asdict
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 
 @dataclass
 class Post:
     """帖子数据结构"""
     id: int  # 序号
-    title: str  # 标题
-    content: str  # 内容
-    href: str  # 链接
+    tid: int  # 主题帖 ID
+    pid: int  # 回复 ID
+    title: str  # 标题（主题帖有，回复为空）
+    content: str  # 文本内容
     forum: str  # 贴吧名
+    href: str  # 帖子链接
+    fid: int = 0  # 贴吧 ID
+    create_time: int = 0  # 创建时间戳
+    is_comment: bool = False  # 是否楼中楼
+    is_thread: bool = False  # 是否为用户发的主题帖
 
     def to_dict(self) -> Dict[str, Any]:
         """转换为字典"""
         return asdict(self)
 
+    @staticmethod
+    def build_href(tid: int, pid: int = 0) -> str:
+        """构建帖子链接"""
+        if pid:
+            return f"https://tieba.baidu.com/p/{tid}?pid={pid}"
+        return f"https://tieba.baidu.com/p/{tid}"
+
 
 class PostParser:
     """帖子数据解析器"""
 
-    # 每页帖子数（API 固定值）
-    PAGE_SIZE = 20
-
-    def parse_response(
-        self,
-        data: Dict[str, Any],
-        page: int,
-        start_id: int = 0,
-    ) -> List[Post]:
+    @staticmethod
+    def from_user_thread(uthread: Any, post_id: int = 0) -> Post:
         """
-        解析 API 响应数据
+        从 aiotieba UserThread 对象创建 Post
 
         Args:
-            data: API 返回的 JSON 数据
-            page: 当前页码
-            start_id: 起始序号（用于跨页连续编号）
+            uthread: aiotieba 的 UserThread 对象
+            post_id: 序号
 
         Returns:
-            帖子列表
+            Post 对象
         """
-        posts: List[Post] = []
-
-        # 提取 posts 数组
-        raw_posts = self._extract_posts(data)
-
-        for i, raw_post in enumerate(raw_posts):
-            post = self._parse_single_post(raw_post, start_id + i + 1)
-            if post:
-                posts.append(post)
-
-        return posts
-
-    def _extract_posts(self, data: Dict[str, Any]) -> List[Dict[str, Any]]:
-        """
-        从响应数据中提取帖子列表
-
-        Args:
-            data: API 响应数据
-
-        Returns:
-            原始帖子列表
-        """
-        if not isinstance(data, dict):
-            return []
-
-        return data.get("posts", [])
-
-    def _parse_single_post(
-        self,
-        raw_post: Dict[str, Any],
-        post_id: int,
-    ) -> Optional[Post]:
-        """
-        解析单个帖子
-
-        Args:
-            raw_post: 原始帖子数据
-            post_id: 帖子序号
-
-        Returns:
-            Post 对象，解析失败返回 None
-        """
-        if not isinstance(raw_post, dict):
-            return None
-
-        href = raw_post.get("href", "")
-
+        tid = uthread.tid
+        pid = uthread.pid
         return Post(
             id=post_id,
-            title=raw_post.get("title", ""),
-            content=raw_post.get("content", ""),
-            href=href,
-            forum=self._extract_forum_name(href),
+            tid=tid,
+            pid=pid,
+            title=uthread.title,
+            content=uthread.text,
+            forum=uthread.fname,
+            href=Post.build_href(tid, pid),
+            fid=uthread.fid,
+            create_time=uthread.create_time,
+            is_comment=False,
+            is_thread=True,
         )
 
-    def _extract_forum_name(self, href: str) -> str:
+    @staticmethod
+    def from_user_post(upost: Any, post_id: int = 0) -> Post:
         """
-        从链接中提取贴吧名
+        从 aiotieba UserPost 对象创建 Post
 
         Args:
-            href: 帖子链接
+            upost: aiotieba 的 UserPost 对象
+            post_id: 序号
 
         Returns:
-            贴吧名（当前 API 不提供此信息，返回占位符）
-
-        Note:
-            tb.anova.me API 返回的数据中不包含贴吧名，
-            如需获取真实贴吧名，需要额外请求帖子详情页
+            Post 对象
         """
-        # TODO: 如需真实贴吧名，可在此实现额外请求
-        if not href:
-            return ""
-        return "贴吧"
+        tid = upost.tid
+        pid = upost.pid
+        return Post(
+            id=post_id,
+            tid=tid,
+            pid=pid,
+            title="",  # 回复没有标题
+            content=upost.text,
+            forum="",  # 需要后续解析
+            href=Post.build_href(tid, pid),
+            fid=upost.fid,
+            create_time=upost.create_time,
+            is_comment=upost.is_comment,
+            is_thread=False,
+        )
 
-    def has_more_data(self, data: Dict[str, Any]) -> bool:
+    @staticmethod
+    def from_dict(data: Dict[str, Any], post_id: int = 0) -> Post:
         """
-        检查是否还有更多数据
+        从字典创建 Post（用于加载已保存的数据）
+
+        兼容新旧格式：
+        - 新格式：直接有 tid, pid 等字段
+        - 旧格式：从 href 中提取 tid
 
         Args:
-            data: API 响应数据
+            data: 帖子字典
+            post_id: 序号（0 表示使用字典中的 id）
 
         Returns:
-            是否还有更多数据
+            Post 对象
         """
-        posts = self._extract_posts(data)
-        return len(posts) > 0
+        from AutoCCF.utils import extract_tid_from_href, extract_pid_from_href
 
-    def get_posts_count(self, data: Dict[str, Any]) -> int:
-        """
-        获取当前页帖子数量
+        tid = data.get("tid", 0)
+        pid = data.get("pid", 0)
+        href = data.get("href", "")
 
-        Args:
-            data: API 响应数据
+        # 旧格式兼容：从 href 中提取 tid/pid
+        if not tid and href:
+            tid = extract_tid_from_href(href) or 0
+        if not pid and href:
+            pid = extract_pid_from_href(href) or 0
 
-        Returns:
-            帖子数量
-        """
-        return len(self._extract_posts(data))
+        return Post(
+            id=post_id or data.get("id", 0),
+            tid=tid,
+            pid=pid,
+            title=data.get("title", ""),
+            content=data.get("content", ""),
+            forum=data.get("forum", ""),
+            href=href or Post.build_href(tid, pid),
+            fid=data.get("fid", 0),
+            create_time=data.get("create_time", 0),
+            is_comment=data.get("is_comment", False),
+            is_thread=data.get("is_thread", False),
+        )

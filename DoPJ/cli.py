@@ -12,13 +12,18 @@ import time
 import threading
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
-from typing import Optional
+from typing import Dict, List, Optional, Any
 
 # 添加父目录到路径以导入 autoccf
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from AutoCCF.cli import CLI, Colors
+from AutoCCF.logging import get_dopj_logger
+from AutoCCF.utils import extract_tid_from_href
 from DoPJ.scraper import scrape_thread
+
+# 模块 logger
+logger = get_dopj_logger()
 
 
 VERSION = "2.0.0"
@@ -76,25 +81,32 @@ class TaskManager:
 
         Args:
             json_path: JSON 文件路径
-            output_dir: 输出目录
+            output_dir: 输出目录（数据库根目录）
         """
-        # 提取用户名（从文件名或目录名）
         self.source_file = os.path.basename(json_path)
-        
-        # 如果输入文件是 posts.json（统一架构），从目录名提取用户名
+        parent_dir = os.path.dirname(json_path)
+        parent_name = os.path.basename(parent_dir)
+
         if self.source_file == "posts.json":
-            # 输入路径格式: database/用户名/posts.json
-            # 输出目录已经是用户目录，直接使用
-            self.user_name = os.path.basename(os.path.dirname(json_path))
-            self.user_output_dir = output_dir
+            # 新版路径: database/{username}/apou/posts.json
+            # 旧版路径: database/{username}/posts.json
+            if parent_name == "apou":
+                # 新版：父目录是 apou，用户目录在更上一层
+                user_dir = os.path.dirname(parent_dir)
+                self.user_name = os.path.basename(user_dir)
+            else:
+                # 旧版：父目录就是用户目录
+                self.user_name = parent_name
+                user_dir = parent_dir
+            # DoPJ 输出到 {user_dir}/dopj/
+            self.user_output_dir = os.path.join(user_dir, "dopj")
         else:
             # 传统格式: 用户名_posts.json
             self.user_name = self._extract_user_name(self.source_file)
-            # 创建用户输出目录
-            self.user_output_dir = os.path.join(output_dir, self.user_name)
-        
+            self.user_output_dir = os.path.join(output_dir, self.user_name, "dopj")
+
         os.makedirs(self.user_output_dir, exist_ok=True)
-        
+
         with open(json_path, "r", encoding="utf-8") as f:
             data = json.load(f)
 
@@ -109,14 +121,16 @@ class TaskManager:
             if tid and tid not in seen_tids:
                 seen_tids.add(tid)
                 task_index += 1
+                # 每个帖子独立的 TiebaReader 兼容存档目录
+                task_output_dir = os.path.join(self.user_output_dir, str(tid))
                 task = Task(
                     index=task_index,
                     tid=tid,
-                    title=post.get("title", f"帖子 {tid}"),
-                    output_dir=self.user_output_dir,  # 使用用户目录
+                    title=post.get("title") or f"帖子 {tid}",
+                    output_dir=task_output_dir,
                     href=post.get("href", ""),
                     pid=post.get("pid"),
-                    json_id=post.get("id"),  # 保存 JSON 中的原始 id
+                    json_id=post.get("id"),
                 )
                 self.tasks.append(task)
 
@@ -137,14 +151,7 @@ class TaskManager:
             return int(post["tid"])
 
         href = post.get("href", "")
-        if "/p/" in href:
-            try:
-                tid_str = href.split("/p/")[1].split("?")[0].split("#")[0]
-                return int(tid_str)
-            except (IndexError, ValueError):
-                pass
-
-        return None
+        return extract_tid_from_href(href)
 
     def get_next_task(self) -> Optional[Task]:
         """获取下一个待处理的任务"""
@@ -161,6 +168,19 @@ class TaskManager:
 
             return None
 
+    def has_retryable_tasks(self) -> bool:
+        """检查是否存在可重试的失败任务"""
+        with self._lock:
+            return any(
+                t.status == TaskStatus.FAILED and t.retry_count < self.max_retries
+                for t in self.tasks
+            )
+
+    def reset_index(self) -> None:
+        """重置任务索引，允许重新扫描失败任务"""
+        with self._lock:
+            self._current_index = 0
+
     def mark_success(self, task: Task) -> None:
         """标记任务成功"""
         with self._lock:
@@ -174,7 +194,7 @@ class TaskManager:
             task.error_msg = error_msg
             self.save_progress()
 
-    def get_stats(self) -> dict:
+    def get_stats(self) -> Dict[str, int]:
         """获取统计信息"""
         with self._lock:
             total = len(self.tasks)
@@ -238,26 +258,29 @@ class TaskManager:
     
     def skip_existing_threads(self) -> int:
         """
-        跳过已经存档的帖子（threads/tid 目录已存在）
-        
+        跳过已经存档的帖子
+
+        新版路径: dopj/{tid}/threads/{tid}/thread.json
+        旧版路径: threads/{tid}/thread.json
+
         Returns:
             跳过的任务数
         """
         skipped = 0
-        threads_dir = os.path.join(self.user_output_dir, "threads")
-        
+
         for task in self.tasks:
             if task.status != TaskStatus.PENDING:
                 continue
-                
-            thread_dir = os.path.join(threads_dir, str(task.tid))
-            # 检查是否有 thread.json（表示已成功爬取）
-            thread_file = os.path.join(thread_dir, "thread.json")
-            
+
+            # 新版路径: task.output_dir = dopj/{tid}/
+            thread_file = os.path.join(
+                task.output_dir, "threads", str(task.tid), "thread.json"
+            )
+
             if os.path.exists(thread_file):
                 task.status = TaskStatus.SKIPPED
                 skipped += 1
-        
+
         return skipped
 
     def save_index(self) -> str:
@@ -354,7 +377,7 @@ class AccountManager:
             if is_auth_error or self._fail_counts[idx] >= self.max_fails:
                 self._banned[idx] = True
 
-    def get_status(self) -> dict:
+    def get_status(self) -> Dict[str, Any]:
         """获取账户状态"""
         with self._lock:
             return {
@@ -377,12 +400,13 @@ class DoPJRunner:
     def __init__(
         self,
         input_json: str,
-        config_file: str,
         output_dir: str = "posts",
         threads: int = 3,
         max_retries: int = 3,
         progress_file: str = "progress.json",
         cli: Optional[CLI] = None,
+        config_file: Optional[str] = None,
+        config_dict: Optional[dict] = None,
     ):
         self.input_json = input_json
         self.output_dir = output_dir
@@ -390,13 +414,18 @@ class DoPJRunner:
         self.max_retries = max_retries
         self.cli = cli
 
-        # 加载配置
-        with open(config_file, "r", encoding="utf-8") as f:
-            config = json.load(f)
+        # 加载配置：优先 dict，其次文件
+        if config_dict is not None:
+            config = config_dict
+        elif config_file is not None:
+            with open(config_file, "r", encoding="utf-8") as f:
+                config = json.load(f)
+        else:
+            raise ValueError("必须提供 config_file 或 config_dict")
 
         accounts = config.get("accounts", [])
         if not accounts:
-            raise ValueError("配置文件中没有账户信息")
+            raise ValueError("配置中没有账户信息")
 
         self.account_manager = AccountManager(
             accounts=accounts,
@@ -472,6 +501,7 @@ class DoPJRunner:
         """处理单个任务"""
         account = self.account_manager.get_account()
         if not account:
+            logger.warning(f"任务 {task.index}: 所有账户都不可用，跳过")
             if self.cli:
                 self.cli.warning(f"[{task.index:04d}] 所有账户都不可用，跳过任务")
             self.task_manager.mark_failed(task, "所有账户都不可用")
@@ -491,12 +521,11 @@ class DoPJRunner:
                 ],
             )
 
-        # 异步爬取
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
+        logger.debug(f"开始爬取任务 {task.index}: tid={task.tid}")
 
         try:
-            success, error_msg = loop.run_until_complete(
+            # 使用 asyncio.run() 简化事件循环管理
+            success, error_msg = asyncio.run(
                 scrape_thread(
                     tid=task.tid,
                     bduss=account["bduss"],
@@ -505,11 +534,13 @@ class DoPJRunner:
             )
 
             if success:
+                logger.info(f"任务 {task.index} 成功: tid={task.tid}")
                 if self.cli:
                     print(f"  {Colors.GREEN}+ 爬取成功{Colors.RESET}")
                 self.task_manager.mark_success(task)
                 self.account_manager.report_success(account)
             else:
+                logger.warning(f"任务 {task.index} 失败: {error_msg}")
                 if self.cli:
                     print(f"  {Colors.RED}x 爬取失败: {error_msg}{Colors.RESET}")
                 is_auth_error = any(k in error_msg for k in ["BDUSS", "认证", "权限"])
@@ -517,13 +548,11 @@ class DoPJRunner:
                 self.account_manager.report_failure(account, is_auth_error)
 
         except Exception as e:
+            logger.error(f"任务 {task.index} 异常: {e}", exc_info=True)
             if self.cli:
                 print(f"  {Colors.RED}x 处理异常: {e}{Colors.RESET}")
             self.task_manager.mark_failed(task, str(e))
             self.account_manager.report_failure(account, False)
-
-        finally:
-            loop.close()
 
         self._print_progress()
 
@@ -532,10 +561,14 @@ class DoPJRunner:
         stats = self.task_manager.get_stats()
         elapsed = time.time() - self.start_time
 
+        logger.debug(f"进度: 成功={stats['success']}, 失败={stats['failed']}, 总计={stats['total']}")
+
         if self.cli:
             self.cli.clear_line()
+            # 已完成数 = 成功 + 失败 + 跳过（增量模式已存档的任务）
+            completed = stats["success"] + stats["failed"] + stats.get("skipped", 0)
             self.cli.print_progress_bar(
-                current=stats["success"] + stats["failed"],
+                current=completed,
                 total=stats["total"],
                 suffix=f"成功: {stats['success']} | 失败: {stats['failed']} | 耗时: {self.cli.format_duration(elapsed)}",
             )
@@ -548,14 +581,24 @@ class DoPJRunner:
         if self.cli:
             self.cli.print_section("开始爬取")
 
-        with ThreadPoolExecutor(max_workers=self.threads) as executor:
-            while True:
-                task = self.task_manager.get_next_task()
-                if task is None:
-                    break
+        # 外层循环：每轮结束后检查是否有可重试的失败任务
+        while True:
+            with ThreadPoolExecutor(max_workers=self.threads) as executor:
+                while True:
+                    task = self.task_manager.get_next_task()
+                    if task is None:
+                        break
+                    executor.submit(self.process_task, task)
+                    time.sleep(0.5)
+            # executor 在此已等待所有任务完成
 
-                executor.submit(self.process_task, task)
-                time.sleep(0.5)
+            # 检查是否有需要重试的失败任务
+            if self.task_manager.has_retryable_tasks():
+                self.task_manager.reset_index()
+                if self.cli:
+                    self.cli.info("正在重试失败的任务...")
+                continue
+            break
 
         # 保存 index.json 索引文件
         index_path = self.task_manager.save_index()
@@ -655,9 +698,21 @@ def main():
     runner: Optional[DoPJRunner] = None
 
     try:
+        # 从配置文件读取并构建 config_dict
+        with open(config_file, "r", encoding="utf-8") as f:
+            raw_config = json.load(f)
+
+        # 支持统一配置格式（accounts 在顶层，dopj 参数在 dopj 子节点）
+        dopj_section = raw_config.get("dopj", {})
+        config_dict = {
+            "accounts": raw_config.get("accounts", []),
+            "min_interval": dopj_section.get("min_interval", raw_config.get("min_interval", 2.0)),
+            "max_fails": dopj_section.get("max_fails", raw_config.get("max_fails", 5)),
+        }
+
         runner = DoPJRunner(
             input_json=input_file,
-            config_file=config_file,
+            config_dict=config_dict,
             output_dir=args.output,
             threads=args.threads,
             max_retries=args.retries,
@@ -718,8 +773,8 @@ def get_config_file(args: argparse.Namespace, cli: CLI) -> str:
             sys.exit(1)
         return args.config
 
-    # 尝试自动查找配置文件
-    default_configs = ["config.json", "DoPJ/config/config.json", "accounts.json"]
+    # 尝试自动查找配置文件（优先统一配置）
+    default_configs = ["config.json", "autoccf.json", "DoPJ/config/config.json", "accounts.json"]
     for default in default_configs:
         if os.path.exists(default):
             use_default = input(

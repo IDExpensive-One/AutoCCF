@@ -229,6 +229,55 @@ class TiebaClient:
             operation=f"获取评论 [tid={tid}, pid={pid}, pn={pn}]",
         )
 
+    async def get_user_posts(
+        self,
+        id_: str | int,
+        pn: int = 1,
+        rn: int = 20,
+    ) -> Optional[Any]:
+        """
+        获取用户发布的回复列表
+
+        Args:
+            id_: 用户 ID / 用户名 / portrait
+            pn: 页码
+            rn: 每页条数（最大 50）
+
+        Returns:
+            UserPostss 对象或 None
+        """
+        return await self._retry_request(
+            "get_user_posts",
+            id_,
+            pn,
+            rn=rn,
+            validate=lambda r: r is not None and r.err is None,
+            operation=f"获取用户回复 [id={id_}, pn={pn}]",
+        )
+
+    async def get_user_threads(
+        self,
+        id_: str | int,
+        pn: int = 1,
+    ) -> Optional[Any]:
+        """
+        获取用户发布的主题帖列表
+
+        Args:
+            id_: 用户 ID / 用户名 / portrait
+            pn: 页码
+
+        Returns:
+            UserThreads 对象或 None
+        """
+        return await self._retry_request(
+            "get_user_threads",
+            id_,
+            pn,
+            validate=lambda r: r is not None and r.err is None,
+            operation=f"获取用户主题帖 [id={id_}, pn={pn}]",
+        )
+
     async def get_user_info(
         self,
         user_id: str | int,

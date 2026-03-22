@@ -133,6 +133,10 @@ class MediaDownloader:
             logger.warning(f"空 URL，跳过下载: {filename}")
             return f"{filename}.{fallback_ext}" if fallback_ext else filename, False
 
+        # 补全协议相对 URL
+        if url.startswith("//"):
+            url = "https:" + url
+
         save_dir = Path(save_dir)
         save_dir.mkdir(parents=True, exist_ok=True)
 

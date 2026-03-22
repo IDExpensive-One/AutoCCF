@@ -10,8 +10,10 @@
 """
 from dataclasses import dataclass, field, asdict
 from enum import IntEnum, auto
+from pathlib import Path
 from typing import Optional, Any
 import json
+import time as _time
 
 
 # =============================================================================
@@ -503,26 +505,68 @@ class ForumInfo:
 
 
 @dataclass
-class ScrapeInfo:
-    """
-    爬取信息
+class ScrapeRecord:
+    """单次爬取记录（TiebaReader 兼容）"""
 
-    用于保存到 scrape_info.json 文件。
-    """
-
-    scraper_version: str = ""
     scrape_time: int = 0
-    tid: int = 0
-    forum_name: str = ""
-    thread_title: str = ""
+    scrape_config: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
-        """转换为字典"""
-        return asdict(self)
+        return {"scrape_time": self.scrape_time, "scrape_config": self.scrape_config}
+
+
+@dataclass
+class ScrapeInfo:
+    """
+    爬取信息（TiebaReader 兼容）
+
+    保存到每个帖子存档根目录的 scrape_info.json。
+    格式与 TiebaReader / TiebaArchiver 完全一致。
+    """
+
+    main_thread: int = 0
+    create_time: int = 0
+    update_time: int = 0
+    scraper_version: str = ""
+    scrape_records: list[ScrapeRecord] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "main_thread": self.main_thread,
+            "create_time": self.create_time,
+            "update_time": self.update_time,
+            "scraper_version": self.scraper_version,
+            "scrape_records": [r.to_dict() for r in self.scrape_records],
+        }
 
     def to_json(self, indent: int = 2) -> str:
-        """转换为 JSON 字符串"""
         return json.dumps(self.to_dict(), ensure_ascii=False, indent=indent)
+
+    @classmethod
+    def load_or_create(cls, path: Path, tid: int, version: str) -> "ScrapeInfo":
+        """加载已有或创建新的 ScrapeInfo"""
+        now = int(_time.time())
+        if path.exists():
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                return cls(
+                    main_thread=data.get("main_thread", tid),
+                    create_time=data.get("create_time", now),
+                    update_time=now,
+                    scraper_version=version,
+                    scrape_records=[
+                        ScrapeRecord(**r) for r in data.get("scrape_records", [])
+                    ],
+                )
+            except Exception:
+                pass
+        return cls(
+            main_thread=tid,
+            create_time=now,
+            update_time=now,
+            scraper_version=version,
+        )
 
 
 @dataclass
@@ -597,6 +641,7 @@ __all__ = [
     "ForumInfo",
     "VoteInfo",
     "VoteOption",
+    "ScrapeRecord",
     "ScrapeInfo",
     "ScrapeBatch",
     # 辅助函数
