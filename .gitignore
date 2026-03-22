@@ -95,6 +95,12 @@ scraped_data/
 Thumbs.db
 .DS_Store
 
+# Node.js / Electron
+node_modules/
+electron/out/
+electron/test-results/
+electron/.playwright/
+
 # 其他
 *.bak
 *.orig
