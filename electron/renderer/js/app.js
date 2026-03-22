@@ -2,6 +2,8 @@ import { api } from "./api.js";
 import * as homeView from "./views/home.js";
 import * as apouView from "./views/apou.js";
 import * as dopjView from "./views/dopj.js";
+import * as usersView from "./views/users.js";
+import * as userDetailView from "./views/user-detail.js";
 
 const VIEW_TITLES = {
   home: "首页",
@@ -81,8 +83,15 @@ export function initApp() {
       return;
     }
 
+    if (name === "users") {
+      router.register(name, usersView);
+      return;
+    }
+
     router.register(name, createPlaceholderView(name));
   });
+
+  router.register("user-detail", userDetailView);
 
   document.querySelectorAll(".nav-item").forEach((item) => {
     item.addEventListener("click", (event) => {
