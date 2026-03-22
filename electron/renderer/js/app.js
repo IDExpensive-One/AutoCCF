@@ -1,6 +1,7 @@
 import { api } from "./api.js";
 import * as homeView from "./views/home.js";
 import * as apouView from "./views/apou.js";
+import * as dopjView from "./views/dopj.js";
 
 const VIEW_TITLES = {
   home: "首页",
@@ -72,6 +73,11 @@ export function initApp() {
 
     if (name === "apou") {
       router.register(name, apouView);
+      return;
+    }
+
+    if (name === "dopj") {
+      router.register(name, dopjView);
       return;
     }
 

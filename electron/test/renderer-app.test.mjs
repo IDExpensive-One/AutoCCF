@@ -54,6 +54,32 @@ class FakeElement {
     this._innerHTML = value;
     this.children.clear();
 
+    if (value.includes("data-apou-form")) {
+      this.children.set("[data-apou-form]", new FakeInteractiveElement());
+      this.children.set("#apou-username", new FakeInteractiveElement());
+      this.children.set("[data-start-crawl]", new FakeInteractiveElement());
+      this.children.set("[data-status]", new FakeInteractiveElement());
+      this.children.set("[data-progress-card]", new FakeInteractiveElement());
+      this.children.set("[data-progress-fill]", new FakeInteractiveElement());
+      this.children.set("[data-progress-text]", new FakeInteractiveElement());
+      this.children.set("[data-page-text]", new FakeInteractiveElement());
+      this.children.set("[data-log-card]", new FakeInteractiveElement());
+      this.children.set("[data-log-viewer]", new FakeInteractiveElement());
+    }
+
+    if (value.includes("data-dopj-form")) {
+      this.children.set("[data-dopj-form]", new FakeInteractiveElement());
+      this.children.set("[data-user-select]", new FakeInteractiveElement());
+      this.children.set("[data-start-crawl]", new FakeInteractiveElement());
+      this.children.set("[data-status]", new FakeInteractiveElement());
+      this.children.set("[data-account-body]", new FakeInteractiveElement());
+      this.children.set("[data-progress-card]", new FakeInteractiveElement());
+      this.children.set("[data-progress-fill]", new FakeInteractiveElement());
+      this.children.set("[data-progress-text]", new FakeInteractiveElement());
+      this.children.set("[data-log-card]", new FakeInteractiveElement());
+      this.children.set("[data-log-viewer]", new FakeInteractiveElement());
+    }
+
     if (value.includes('data-nav="apou"')) {
       this.children.set('[data-nav="apou"]', new FakeActionElement("apou"));
     }
@@ -98,6 +124,39 @@ class FakeActionElement {
   closest() {
     return this;
   }
+}
+
+class FakeInteractiveElement {
+  constructor() {
+    this.listeners = new Map();
+    this.style = {};
+    this.hidden = false;
+    this.disabled = false;
+    this.value = "";
+    this.textContent = "";
+    this.innerHTML = "";
+    this.scrollTop = 0;
+    this.scrollHeight = 0;
+  }
+
+  addEventListener(type, listener) {
+    this.listeners.set(type, listener);
+  }
+
+  removeEventListener(type, listener) {
+    const current = this.listeners.get(type);
+    if (current === listener) {
+      this.listeners.delete(type);
+    }
+  }
+
+  append(child) {
+    this.textContent = child?.textContent || "";
+    this.scrollHeight += 1;
+    this.scrollTop = this.scrollHeight;
+  }
+
+  focus() {}
 }
 
 function createEnvironment(options = {}) {
@@ -221,14 +280,15 @@ test("renderer api wrapper and home view work", async () => {
   await new Promise((resolve) => setTimeout(resolve, 0));
 
   assert.equal(env.header.textContent, "APoU");
-  assert.match(env.content.innerHTML, /APoU 视图开发中/);
+  assert.match(env.content.innerHTML, /开始 APoU 爬取/);
   assert.equal(env.navItems[1].classList.contains("active"), true);
 
   env.navItems[2].click();
   await new Promise((resolve) => setTimeout(resolve, 0));
 
   assert.equal(env.header.textContent, "DoPJ");
-  assert.match(env.content.innerHTML, /DoPJ 视图开发中/);
+  assert.match(env.content.innerHTML, /开始 DoPJ 爬取/);
+  assert.match(env.content.innerHTML, /账户状态/);
   assert.equal(env.navItems[0].classList.contains("active"), false);
   assert.equal(env.navItems[2].classList.contains("active"), true);
 
