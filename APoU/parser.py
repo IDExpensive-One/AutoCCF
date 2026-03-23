@@ -93,6 +93,48 @@ class PostParser:
         )
 
     @staticmethod
+    def from_anova_post(raw: Dict[str, Any], post_id: int = 0) -> Post:
+        """
+        从 tb.anova.me 的帖子字典创建 Post
+
+        tb.anova.me 格式:
+            {"title": "...", "content": "...", "href": "https://tieba.baidu.com/p/TID?pid=PID#PID"}
+
+        Args:
+            raw: tb.anova.me 返回的帖子字典
+            post_id: 序号
+
+        Returns:
+            Post 对象
+        """
+        from AutoCCF.utils import extract_tid_from_href, extract_pid_from_href
+
+        href = raw.get("href", "")
+        title = raw.get("title", "")
+        content = raw.get("content", "")
+
+        tid = extract_tid_from_href(href) or 0
+        pid = extract_pid_from_href(href) or 0
+
+        # anova 始终返回帖子标题（即使是回复），无法可靠判断 is_thread
+        # 默认为 False（回复），因为大多数用户发言是回复而非主题帖
+        is_thread = False
+
+        return Post(
+            id=post_id,
+            tid=tid,
+            pid=pid,
+            title=title,
+            content=content,
+            forum="",  # anova 不提供贴吧名
+            href=href,
+            fid=0,  # anova 不提供 fid
+            create_time=0,  # anova 不提供时间戳
+            is_comment=False,  # anova 不区分楼中楼
+            is_thread=is_thread,
+        )
+
+    @staticmethod
     def from_dict(data: Dict[str, Any], post_id: int = 0) -> Post:
         """
         从字典创建 Post（用于加载已保存的数据）

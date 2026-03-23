@@ -8,6 +8,7 @@ import os
 from typing import Any, Callable, Dict, List, Optional, Set, TYPE_CHECKING
 
 from .api_client import TiebaAPIClient
+from .anova_client import AnovaAPIClient
 from .config import CrawlerConfig, DEFAULT_CONFIG
 from .parser import Post, PostParser
 from .storage import Storage
@@ -116,45 +117,62 @@ class UserPostsCrawler:
                 self._print("增量模式: 无历史数据，将获取全部", "info")
 
         try:
-            async with TiebaAPIClient(self.config) as client:
-                # 阶段 1: 获取用户主题帖
-                self._print("正在获取用户主题帖...", "progress")
-                thread_posts = await self._fetch_user_threads(
-                    client, username, existing_pids, incremental
+            # 双引擎策略: aiotieba 主引擎 + tb.anova.me 补充引擎
+            # 始终先用 aiotieba（数据质量高：有 fid, forum, create_time）
+            # 然后用 anova 补充缺失的数据（针对隐私保护用户）
+            aiotieba_posts = await self._try_aiotieba_engine(
+                username, forum, existing_pids, incremental
+            )
+
+            if aiotieba_posts is None:
+                aiotieba_posts = []
+
+            # 阶段 2: 使用 anova 补充
+            # 条件：aiotieba 获取到的回复数量少（可能是隐私保护）
+            aiotieba_reply_count = sum(
+                1 for p in aiotieba_posts if not p.is_thread
+            )
+
+            if aiotieba_reply_count == 0:
+                # 没有回复数据 — 很可能是隐私保护，用 anova 补充
+                self._print(
+                    f"aiotieba 获取到 {len(aiotieba_posts)} 条"
+                    f"（回复 0 条），使用 tb.anova.me 补充...",
+                    "warning",
                 )
+                anova_posts = await self._try_anova_engine(username)
 
-                # 将主题帖的 fid→fname 映射预填充到缓存
-                for p in thread_posts:
-                    if p.fid and p.forum:
-                        client.seed_forum_cache(p.fid, p.forum)
-
-                # 阶段 2: 获取用户回复
-                self._print("正在获取用户回复...", "progress")
-                reply_posts = await self._fetch_user_posts(
-                    client, username, existing_pids, incremental
-                )
-
-                # 阶段 3: 解析回复的贴吧名
-                fids_to_resolve = {
-                    p.fid for p in reply_posts if p.fid and not p.forum
-                }
-                if fids_to_resolve:
-                    self._print(
-                        f"正在解析 {len(fids_to_resolve)} 个贴吧名...", "progress"
+                if anova_posts:
+                    # 合并两个引擎的结果（去重）
+                    self._posts = self._merge_engine_results(
+                        aiotieba_posts, anova_posts,
                     )
-                    for fid in fids_to_resolve:
-                        fname = await client.resolve_forum_name(fid)
-                        if fname:
-                            for p in reply_posts:
-                                if p.fid == fid and not p.forum:
-                                    p.forum = fname
+                    self._print(
+                        f"双引擎合并: aiotieba {len(aiotieba_posts)} 条 "
+                        f"+ anova {len(anova_posts)} 条 "
+                        f"→ 去重后 {len(self._posts)} 条",
+                        "success",
+                    )
+                else:
+                    self._posts = aiotieba_posts
+                    if not self._posts:
+                        self._print(
+                            "两个引擎均未获取到数据，"
+                            "用户可能确实没有公开发言",
+                            "warning",
+                        )
+            else:
+                # aiotieba 正常返回回复数据 — 无需 anova 补充
+                self._posts = aiotieba_posts
+                self._print(
+                    f"引擎: aiotieba (protobuf API)，"
+                    f"共 {len(self._posts)} 条",
+                    "info",
+                )
 
-                # 合并主题帖和回复
-                self._posts = thread_posts + reply_posts
-
-                # 按论坛名筛选
-                if forum:
-                    self._posts = [p for p in self._posts if p.forum == forum]
+            # 按论坛名筛选
+            if forum:
+                self._posts = [p for p in self._posts if p.forum == forum]
 
         except KeyboardInterrupt:
             self._print("收到中断信号，保存当前进度...", "warning")
@@ -289,6 +307,166 @@ class UserPostsCrawler:
 
         self._print(f"回复获取完成: {len(posts)} 条", "success")
         return posts
+
+    async def _try_aiotieba_engine(
+        self,
+        username: str,
+        forum: str,
+        existing_pids: Set[int],
+        incremental: bool,
+    ) -> Optional[List[Post]]:
+        """
+        尝试使用 aiotieba 引擎获取数据
+
+        Returns:
+            帖子列表（可能为空列表表示用户确实无帖），
+            或 None 表示引擎不可用（隐私保护导致 0 条结果）
+        """
+        try:
+            async with TiebaAPIClient(self.config) as client:
+                # 先试探第 1 页
+                self._print("正在尝试 aiotieba 引擎...", "progress")
+
+                threads_result = await client.fetch_user_threads(username, pn=1)
+                posts_result = await client.fetch_user_posts(
+                    username, pn=1, rn=20,
+                )
+
+                # 统计第 1 页结果数
+                thread_count = 0
+                if threads_result is not None:
+                    thread_count = len(list(threads_result))
+
+                post_count = 0
+                if posts_result is not None:
+                    for group in posts_result:
+                        for _upost in group:
+                            post_count += 1
+
+                if thread_count == 0 and post_count == 0:
+                    # 隐私保护用户 — 返回 None 表示引擎不可用
+                    return None
+
+            # 有数据 — 重新建立连接进行完整爬取
+            # （因为上面的 result 迭代器已被消耗）
+            self._print("aiotieba 引擎可用，开始完整爬取...", "progress")
+
+            async with TiebaAPIClient(self.config) as client:
+                # 获取主题帖
+                self._print("正在获取用户主题帖...", "progress")
+                thread_posts = await self._fetch_user_threads(
+                    client, username, existing_pids, incremental
+                )
+
+                # 预填充贴吧名缓存
+                for p in thread_posts:
+                    if p.fid and p.forum:
+                        client.seed_forum_cache(p.fid, p.forum)
+
+                # 获取回复
+                self._print("正在获取用户回复...", "progress")
+                reply_posts = await self._fetch_user_posts(
+                    client, username, existing_pids, incremental
+                )
+
+                # 解析贴吧名
+                fids_to_resolve = {
+                    p.fid for p in reply_posts if p.fid and not p.forum
+                }
+                if fids_to_resolve:
+                    self._print(
+                        f"正在解析 {len(fids_to_resolve)} 个贴吧名...",
+                        "progress",
+                    )
+                    for fid in fids_to_resolve:
+                        fname = await client.resolve_forum_name(fid)
+                        if fname:
+                            for p in reply_posts:
+                                if p.fid == fid and not p.forum:
+                                    p.forum = fname
+
+                return thread_posts + reply_posts
+
+        except Exception as e:
+            self._print(f"aiotieba 引擎异常: {e}", "warning")
+            return None
+
+    async def _try_anova_engine(
+        self,
+        username: str,
+    ) -> List[Post]:
+        """
+        使用 tb.anova.me 回退引擎获取数据
+
+        Returns:
+            帖子列表（可能为空）
+        """
+        try:
+            async with AnovaAPIClient(self.config) as anova:
+                def on_page(page_num: int, count: int) -> None:
+                    self._print(
+                        f"[anova 第{page_num}页] 获取到 {count} 条",
+                        "info",
+                    )
+                    if self.on_page_complete:
+                        self.on_page_complete(page_num, count)
+
+                raw_posts = await anova.fetch_all_posts(
+                    username, on_page=on_page
+                )
+
+                # 转换为 Post 对象
+                posts = []
+                for i, raw in enumerate(raw_posts):
+                    post = PostParser.from_anova_post(raw, post_id=i + 1)
+                    posts.append(post)
+
+                self._print(
+                    f"tb.anova.me 获取完成: {len(posts)} 条", "success"
+                )
+                return posts
+
+        except Exception as e:
+            self._print(f"tb.anova.me 引擎异常: {e}", "warning")
+            return []
+
+    def _merge_engine_results(
+        self,
+        aiotieba_posts: List[Post],
+        anova_posts: List[Post],
+    ) -> List[Post]:
+        """
+        合并两个引擎的结果
+
+        aiotieba 数据质量高（有 fid, forum, create_time），优先保留。
+        anova 数据按 tid+pid 去重后补充缺失的帖子。
+        """
+        # 构建 aiotieba 已有的 tid+pid 集合
+        seen_keys: Set[tuple[int, int]] = set()
+        merged: List[Post] = []
+
+        for post in aiotieba_posts:
+            key = (post.tid, post.pid)
+            if key not in seen_keys:
+                seen_keys.add(key)
+                merged.append(post)
+
+        # anova 帖子补充（仅添加 aiotieba 没有的）
+        anova_added = 0
+        for post in anova_posts:
+            key = (post.tid, post.pid)
+            if key not in seen_keys:
+                seen_keys.add(key)
+                merged.append(post)
+                anova_added += 1
+
+        if anova_added > 0:
+            self._print(
+                f"anova 补充了 {anova_added} 条新帖子",
+                "info",
+            )
+
+        return merged
 
     def _merge_posts(
         self,

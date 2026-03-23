@@ -27,6 +27,12 @@ class CrawlerConfig:
     # 请求超时（秒）
     request_timeout: float = 30.0
 
+    # tb.anova.me 回退引擎配置
+    anova_base_url: str = "https://tb.anova.me/getPostsNew"
+    anova_page_delay: float = 3.0  # anova 每页延迟（服务器较慢，设更长）
+    anova_request_timeout: float = 60.0  # anova 请求超时（响应较慢）
+    anova_max_retries: int = 3  # anova 单页最大重试次数
+
     # 输出配置
     raw_data_dir: str = "raw_data"
 

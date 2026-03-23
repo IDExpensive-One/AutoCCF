@@ -6,7 +6,7 @@ APoU - All Posts of User
 """
 
 from APoU.crawler import UserPostsCrawler
-from APoU.exceptions import APoUError, AuthError, NetworkError
+from APoU.exceptions import APoUError, AuthError, NetworkError, EngineError, FallbackError
 
 __version__ = "3.0.0"
 __all__ = [
@@ -14,6 +14,8 @@ __all__ = [
     "APoUError",
     "AuthError",
     "NetworkError",
+    "EngineError",
+    "FallbackError",
 ]
 
 

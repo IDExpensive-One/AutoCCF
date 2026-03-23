@@ -109,6 +109,12 @@ electron/.playwright/
 .claude/
 .swarm/
 
+# 临时研究目录
+_tmp_research/
+
+# Superpowers 计划文档
+docs/superpowers/
+
 # Playwright 测试结果
 test-results/
 

@@ -42,3 +42,18 @@ class MaxRetriesExceededError(APoUError):
             "超过最大重试次数",
             f"第 {page} 页，已重试 {max_retries} 次" if page else "",
         )
+
+
+class EngineError(APoUError):
+    """引擎错误（aiotieba 或 anova）"""
+
+    def __init__(self, engine: str, message: str = "引擎执行失败", details: str = ""):
+        self.engine = engine
+        super().__init__(f"[{engine}] {message}", details)
+
+
+class FallbackError(APoUError):
+    """回退引擎也失败"""
+
+    def __init__(self, message: str = "所有引擎均失败", details: str = ""):
+        super().__init__(message, details)
