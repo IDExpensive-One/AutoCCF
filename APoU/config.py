@@ -5,7 +5,7 @@
 from dataclasses import dataclass
 
 
-@dataclass(init=False)
+@dataclass
 class CrawlerConfig:
     """爬虫配置类"""
 
