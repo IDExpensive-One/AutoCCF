@@ -1,7 +1,7 @@
 # AutoCCF
 
 AutoCCF is a Baidu Tieba data collection toolkit with a two-stage workflow for user post discovery and thread detail extraction.  
-AutoCCF 是一个面向百度贴吧的数据采集工具集，采用“两阶段”流程，覆盖用户发言索引采集与帖子详情归档。
+AutoCCF 是一个面向百度贴吧的自动化数据采集工具，采用“两阶段”流程，覆盖用户发言索引采集与帖子详情归档。
 
 ## Overview / 项目概览
 
