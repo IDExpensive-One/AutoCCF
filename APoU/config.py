@@ -5,7 +5,7 @@
 from dataclasses import dataclass
 
 
-@dataclass
+@dataclass(init=False)
 class CrawlerConfig:
     """爬虫配置类"""
 
@@ -38,6 +38,55 @@ class CrawlerConfig:
 
     # 调试配置
     debug: bool = False
+
+    def __init__(
+        self,
+        bduss: str = "",
+        page_delay: float = 2.0,
+        page_size: int = 20,
+        max_retries: int = 3,
+        retry_delay: float = 3.0,
+        max_empty_page_retries: int = 3,
+        empty_page_retry_delay: float = 3.0,
+        request_timeout: float = 30.0,
+        anova_base_url: str = "https://tb.anova.me/getPostsNew",
+        anova_page_delay: float = 3.0,
+        anova_request_timeout: float = 60.0,
+        anova_max_retries: int = 3,
+        raw_data_dir: str = "raw_data",
+        debug: bool = False,
+        base_url: str | None = None,
+    ):
+        """
+        初始化爬虫配置
+
+        Args:
+            base_url: 旧版字段，兼容历史调用；若传入则覆盖 anova_base_url
+        """
+        self.bduss = bduss
+        self.page_delay = page_delay
+        self.page_size = page_size
+        self.max_retries = max_retries
+        self.retry_delay = retry_delay
+        self.max_empty_page_retries = max_empty_page_retries
+        self.empty_page_retry_delay = empty_page_retry_delay
+        self.request_timeout = request_timeout
+        self.anova_base_url = base_url if base_url is not None else anova_base_url
+        self.anova_page_delay = anova_page_delay
+        self.anova_request_timeout = anova_request_timeout
+        self.anova_max_retries = anova_max_retries
+        self.raw_data_dir = raw_data_dir
+        self.debug = debug
+
+    @property
+    def base_url(self) -> str:
+        """兼容旧配置字段，返回 anova 接口地址"""
+        return self.anova_base_url
+
+    @base_url.setter
+    def base_url(self, value: str) -> None:
+        """兼容旧配置字段，允许通过 base_url 更新 anova 接口地址"""
+        self.anova_base_url = value
 
 
 # 默认配置实例
