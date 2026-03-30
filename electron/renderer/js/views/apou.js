@@ -3,7 +3,7 @@ import { api } from "../api.js";
 let currentContainer = null;
 let submitHandler = null;
 let activeRunId = 0;
-let indeterminateTimer = null;
+let loadingTimer = null;
 let currentElements = null;
 
 function cleanupListeners() {
@@ -11,37 +11,33 @@ function cleanupListeners() {
   api.removeAllListeners("bridge:log");
 }
 
-function stopIndeterminateAnimation() {
-  if (indeterminateTimer) {
-    clearInterval(indeterminateTimer);
-    indeterminateTimer = null;
-  }
-
-  if (currentElements?.progressFill) {
-    currentElements.progressFill.style.width = "40%";
+function stopLoadingIndicator() {
+  if (loadingTimer) {
+    clearInterval(loadingTimer);
+    loadingTimer = null;
   }
 }
 
-function startIndeterminateAnimation() {
-  stopIndeterminateAnimation();
+function startLoadingIndicator() {
+  stopLoadingIndicator();
 
-  if (!currentElements?.progressFill) {
+  if (!currentElements?.loadingText) {
     return;
   }
 
-  const widths = ["28%", "52%", "74%", "43%"];
+  const frames = ["加载中", "加载中.", "加载中..", "加载中..."];
   let index = 0;
-  currentElements.progressFill.style.width = widths[index];
+  currentElements.loadingText.textContent = frames[index];
 
-  indeterminateTimer = setInterval(() => {
-    if (!currentElements?.progressFill) {
-      stopIndeterminateAnimation();
+  loadingTimer = setInterval(() => {
+    if (!currentElements?.loadingText) {
+      stopLoadingIndicator();
       return;
     }
 
-    index = (index + 1) % widths.length;
-    currentElements.progressFill.style.width = widths[index];
-  }, 450);
+    index = (index + 1) % frames.length;
+    currentElements.loadingText.textContent = frames[index];
+  }, 400);
 }
 
 function setStatusBadge(type, message) {
@@ -70,28 +66,37 @@ function appendLog(message, level = "info") {
   currentElements.logViewer.scrollTop = currentElements.logViewer.scrollHeight;
 }
 
+async function getExistingPostsCount(username) {
+  try {
+    const result = await api.apou.outputs();
+    const outputs = Array.isArray(result?.outputs) ? result.outputs : [];
+    const found = outputs.find((item) => item?.username === username);
+    return Number(found?.posts_count) || 0;
+  } catch {
+    return 0;
+  }
+}
+
 function renderView(container) {
   container.innerHTML = `
     <div class="card" style="margin-bottom: var(--space-lg);">
-      <h3 class="card-title">开始 APoU 爬取</h3>
+      <h3 class="card-title">开始 APoU 抓取</h3>
       <form data-apou-form style="display: grid; gap: var(--space-md);">
         <div class="form-group">
           <label for="apou-username">贴吧用户名</label>
-          <input id="apou-username" class="input" name="username" type="text" placeholder="输入要爬取的用户名" autocomplete="off">
+          <input id="apou-username" class="input" name="username" type="text" placeholder="输入要抓取的用户名" autocomplete="off">
         </div>
         <div style="display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-md);">
-          <button class="btn btn-primary" type="submit" data-start-crawl>开始爬取</button>
+          <button class="btn btn-primary" type="submit" data-start-crawl>开始抓取</button>
           <div data-status></div>
         </div>
       </form>
     </div>
 
     <div class="card" data-progress-card hidden style="margin-bottom: var(--space-lg);">
-      <h3 class="card-title">爬取进度</h3>
-      <div class="progress-bar" style="margin-bottom: var(--space-md);">
-        <div class="progress-bar-fill" data-progress-fill style="width: 40%;"></div>
-      </div>
-      <p data-progress-text>等待开始...</p>
+      <h3 class="card-title">抓取状态</h3>
+      <p data-loading-text data-loading-indicator style="margin-bottom: var(--space-sm); color: var(--color-text-secondary);">加载中...</p>
+      <p data-progress-text>已爬取 0 条帖子</p>
       <p data-page-text style="margin-top: var(--space-sm); color: var(--color-text-secondary);">准备中...</p>
     </div>
 
@@ -107,11 +112,33 @@ function renderView(container) {
     startButton: container.querySelector("[data-start-crawl]"),
     status: container.querySelector("[data-status]"),
     progressCard: container.querySelector("[data-progress-card]"),
-    progressFill: container.querySelector("[data-progress-fill]"),
+    loadingText: container.querySelector("[data-loading-text]"),
     progressText: container.querySelector("[data-progress-text]"),
     pageText: container.querySelector("[data-page-text]"),
     logCard: container.querySelector("[data-log-card]"),
     logViewer: container.querySelector("[data-log-viewer]"),
+  };
+}
+
+function resolveTotalCount({
+  progressData,
+  fallbackBase,
+  fallbackAccumulated,
+}) {
+  const reportedTotal = Number(progressData?.posts_count);
+  if (Number.isFinite(reportedTotal) && reportedTotal >= 0) {
+    return {
+      total: reportedTotal,
+      accumulated: fallbackAccumulated,
+    };
+  }
+
+  const delta = Number(progressData?.delta_posts_count);
+  const safeDelta = Number.isFinite(delta) && delta >= 0 ? delta : (Number(progressData?.posts_count) || 0);
+  const nextAccumulated = fallbackAccumulated + safeDelta;
+  return {
+    total: fallbackBase + nextAccumulated,
+    accumulated: nextAccumulated,
   };
 }
 
@@ -131,7 +158,13 @@ async function handleSubmit(event) {
 
   activeRunId += 1;
   const runId = activeRunId;
-  let latestPostsCount = 0;
+  const basePostsCount = await getExistingPostsCount(username);
+  let latestPostsCount = basePostsCount;
+  let accumulatedDelta = 0;
+
+  if (runId !== activeRunId || !currentContainer || !currentElements) {
+    return;
+  }
 
   cleanupListeners();
   setStatusBadge("", "");
@@ -139,19 +172,27 @@ async function handleSubmit(event) {
   currentElements.progressCard.hidden = false;
   currentElements.logCard.hidden = false;
   currentElements.logViewer.textContent = "";
-  currentElements.progressText.textContent = "已爬取 0 条帖子";
+  currentElements.loadingText.textContent = "加载中...";
+  currentElements.progressText.textContent = `已爬取 ${basePostsCount} 条帖子`;
   currentElements.pageText.textContent = "正在启动 APoU 爬虫...";
-  startIndeterminateAnimation();
+  startLoadingIndicator();
 
   api.onProgress((data) => {
     if (runId !== activeRunId || !currentContainer || !currentElements) {
       return;
     }
 
-    latestPostsCount = Number(data?.posts_count) || 0;
+    const resolved = resolveTotalCount({
+      progressData: data,
+      fallbackBase: basePostsCount,
+      fallbackAccumulated: accumulatedDelta,
+    });
+    latestPostsCount = resolved.total;
+    accumulatedDelta = resolved.accumulated;
+
     const page = Number(data?.page) || 0;
     currentElements.progressText.textContent = `已爬取 ${latestPostsCount} 条帖子`;
-    currentElements.pageText.textContent = page > 0 ? `正在处理第 ${page} 页` : "正在处理中...";
+    currentElements.pageText.textContent = page > 0 ? `正在处理第 ${page} 步` : "正在处理中...";
   });
 
   api.onLog((data) => {
@@ -168,23 +209,34 @@ async function handleSubmit(event) {
       return;
     }
 
-    const finalPostsCount = Number(result?.posts_count) || latestPostsCount;
-    currentElements.progressText.textContent = `已爬取 ${finalPostsCount} 条帖子`;
+    const finalPostsCount = Number(result?.posts_count);
+    if (Number.isFinite(finalPostsCount) && finalPostsCount >= 0) {
+      latestPostsCount = finalPostsCount;
+    }
+
+    const resultNewCount = Number(result?.new_posts_count);
+    const newPostsCount = Number.isFinite(resultNewCount) && resultNewCount >= 0
+      ? resultNewCount
+      : Math.max(0, latestPostsCount - basePostsCount);
+
+    currentElements.loadingText.textContent = "已完成";
+    currentElements.progressText.textContent = `已爬取 ${latestPostsCount} 条帖子`;
     currentElements.pageText.textContent = "爬取完成";
-    setStatusBadge("success", `爬取完成，共获取 ${finalPostsCount} 条帖子`);
-    appendLog(`APoU 爬取完成，共获取 ${finalPostsCount} 条帖子`, "success");
+    setStatusBadge("success", `爬取完成，累计 ${latestPostsCount} 条（本次新增 ${newPostsCount} 条）`);
+    appendLog(`APoU 爬取完成，累计 ${latestPostsCount} 条，本次新增 ${newPostsCount} 条`, "success");
   } catch (error) {
     if (runId !== activeRunId || !currentContainer || !currentElements) {
       return;
     }
 
-    const message = error?.message || "APoU 爬取失败";
-    currentElements.pageText.textContent = "爬取失败";
+    const message = error?.message || "APoU 抓取失败";
+    currentElements.loadingText.textContent = "加载失败";
+    currentElements.pageText.textContent = "抓取失败";
     setStatusBadge("error", message);
     appendLog(message, "error");
   } finally {
     cleanupListeners();
-    stopIndeterminateAnimation();
+    stopLoadingIndicator();
 
     if (runId === activeRunId && currentElements?.startButton) {
       currentElements.startButton.disabled = false;
@@ -212,7 +264,7 @@ export function unmount() {
   }
 
   cleanupListeners();
-  stopIndeterminateAnimation();
+  stopLoadingIndicator();
   currentContainer = null;
   currentElements = null;
   submitHandler = null;

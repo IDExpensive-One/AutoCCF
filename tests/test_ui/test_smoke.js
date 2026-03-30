@@ -76,9 +76,8 @@ test('user-detail 视图可通过导航渲染', async () => {
   }
 });
 
-test('APoU 视图有 indeterminate 进度条', async () => {
+test('APoU 视图显示加载中标识', async () => {
   const page = await app.firstWindow();
   await page.click('[data-view="apou"]');
-  const progressBar = page.locator('.progress-bar, progress');
-  await expect(progressBar.first()).toHaveCount(1);
+  await expect(page.locator('[data-loading-indicator]')).toHaveCount(1);
 });
