@@ -8,9 +8,11 @@ from dataclasses import dataclass
 from typing import Optional, Any, AsyncIterator
 from contextlib import asynccontextmanager
 import logging
+import re
 
 try:
     import aiotieba as tb
+    from aiotieba.api.get_posts import _api as get_posts_api
 except ImportError:
     raise ImportError(
         "aiotieba 未安装，请运行: pip install aiotieba>=4.4.9"
@@ -18,6 +20,61 @@ except ImportError:
 
 
 logger = logging.getLogger(__name__)
+
+
+def _parse_version(version: str) -> tuple[int, ...]:
+    """解析版本号中的数字部分。"""
+    parts = re.findall(r"\d+", version)
+    return tuple(int(part) for part in parts)
+
+
+def _should_patch_aiotieba_get_posts(version: str) -> bool:
+    """判断是否需要修补 aiotieba 4.6.3 的 get_posts protobuf 兼容问题。"""
+    parsed = _parse_version(version)
+    return parsed != () and parsed < (4, 6, 4)
+
+
+def _patch_aiotieba_get_posts_api() -> None:
+    """为旧版 aiotieba 修补 bool 写入 int protobuf 字段的问题。"""
+    if getattr(get_posts_api, "_AUTOCCF_BOOL_INT_PATCHED", False):
+        return
+
+    version = getattr(tb, "__version__", "")
+    if not _should_patch_aiotieba_get_posts(version):
+        return
+
+    def patched_pack_proto(
+        account,
+        tid: int,
+        pn: int,
+        rn: int,
+        sort: int,
+        only_thread_author: bool,
+        with_comments: bool,
+        comment_sort_by_agree: bool,
+        comment_rn: int,
+    ) -> bytes:
+        req_proto = getattr(get_posts_api.PbPageReqIdl_pb2, "PbPageReqIdl")()
+        req_proto.data.common._client_type = 2
+        req_proto.data.common._client_version = get_posts_api.MAIN_VERSION
+        req_proto.data.kz = tid
+        req_proto.data.pn = pn
+        req_proto.data.rn = rn if rn > 1 else 2
+        req_proto.data.r = sort
+        req_proto.data.lz = int(only_thread_author)
+        if with_comments:
+            req_proto.data.common.BDUSS = account.BDUSS
+            req_proto.data.with_floor = int(with_comments)
+            req_proto.data.floor_sort_type = int(comment_sort_by_agree)
+            req_proto.data.floor_rn = comment_rn
+
+        return req_proto.SerializeToString()
+
+    get_posts_api.pack_proto = patched_pack_proto
+    setattr(get_posts_api, "_AUTOCCF_BOOL_INT_PATCHED", True)
+
+
+_patch_aiotieba_get_posts_api()
 
 
 @dataclass
@@ -281,21 +338,32 @@ class TiebaClient:
     async def get_user_info(
         self,
         user_id: str | int,
+        portrait: Optional[str] = None,
     ) -> Optional[Any]:
         """
         获取用户信息
 
         Args:
-            user_id: 用户 ID 或 portrait
+            user_id: 用户 ID
+            portrait: 用户 portrait（当 user_id 无效时回退）
 
         Returns:
             用户信息对象或 None
         """
+        target: str | int = user_id
+        if (
+            isinstance(user_id, int)
+            and user_id <= 0
+            and portrait
+            and portrait.strip()
+        ):
+            target = portrait.strip()
+
         return await self._retry_request(
             "get_user_info",
-            user_id,
+            target,
             validate=lambda r: r and r.user_id != 0,
-            operation=f"获取用户信息 [user_id={user_id}]",
+            operation=f"获取用户信息 [id={target}]",
         )
 
 

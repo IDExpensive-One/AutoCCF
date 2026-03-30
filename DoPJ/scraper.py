@@ -4,7 +4,6 @@ DoPJ 帖子爬取器
 全新实现，不依赖 TiebaArchiver，直接使用 aiotieba 库。
 """
 import asyncio
-import json
 import time
 import logging
 from pathlib import Path
@@ -40,6 +39,7 @@ from AutoCCF.tieba.models import (
     contents_to_json,
 )
 from DoPJ.storage import ContentDatabase
+from DoPJ.producer_consumer import ProducerConsumerCoordinator, ProducerConsumerConfig
 
 
 logger = logging.getLogger(__name__)
@@ -57,6 +57,7 @@ class ContentProcessor:
         downloader: MediaDownloader,
         asset_manager: AssetManager,
         db: ContentDatabase,
+        download_media: bool = True,
     ):
         """
         初始化内容处理器
@@ -65,10 +66,12 @@ class ContentProcessor:
             downloader: 媒体下载器
             asset_manager: 资产管理器
             db: 内容数据库
+            download_media: 是否下载媒体文件
         """
         self.downloader = downloader
         self.asset_manager = asset_manager
         self.db = db
+        self.download_media = download_media
 
     async def process_contents(
         self,
@@ -152,6 +155,15 @@ class ContentProcessor:
     async def _process_image(self, frag, pid: int, idx: int) -> FragImage:
         """处理图片片段"""
         origin_src = str(frag.origin_src) if hasattr(frag, "origin_src") else ""
+        if not self.download_media:
+            return FragImage(
+                filename="",
+                tb_origin_src=origin_src,
+                origin_size=getattr(frag, "origin_size", 0),
+                show_width=getattr(frag, "show_width", 0),
+                show_height=getattr(frag, "show_height", 0),
+                hash=getattr(frag, "hash", ""),
+            )
 
         if origin_src:
             filename_base = self.asset_manager.get_image_filename(
@@ -214,6 +226,17 @@ class ContentProcessor:
 
         video_filename = ""
         cover_filename = ""
+        if not self.download_media:
+            return FragVideo(
+                filename=video_filename,
+                cover_filename=cover_filename,
+                duration=getattr(frag, "duration", 0),
+                width=getattr(frag, "width", 0),
+                height=getattr(frag, "height", 0),
+                view_num=getattr(frag, "view_num", 0),
+                tb_origin_src=video_src,
+                tb_origin_cover_src=cover_src,
+            )
 
         if video_src:
             filename_base = self.asset_manager.get_video_filename(pid, idx)
@@ -258,6 +281,14 @@ class ContentProcessor:
         voice_url = TiebaVoiceAPI.get_voice_url(md5) if md5 else ""
 
         voice_filename = ""
+        if not self.download_media:
+            return FragVoice(
+                filename=voice_filename,
+                md5=md5,
+                duration=getattr(frag, "duration", 0),
+                tb_origin_src=voice_url,
+            )
+
         if voice_url:
             filename_base = self.asset_manager.get_voice_filename(pid, idx, md5)
             voice_filename, success = await self.downloader.download_file(
@@ -382,8 +413,14 @@ class ThreadScraper:
         Returns:
             (是否成功, 错误信息)
         """
+        if self._client is None or self._downloader is None:
+            return False, "客户端未初始化"
+
+        client = self._client
+        downloader = self._downloader
+
         # 获取第一页，检查帖子是否存在
-        posts_page = await self._client.get_posts(
+        posts_page = await client.get_posts(
             tid,
             pn=1,
             with_comments=True,
@@ -412,7 +449,10 @@ class ThreadScraper:
 
             # 初始化内容处理器
             processor = ContentProcessor(
-                self._downloader, asset_manager, db
+                downloader,
+                asset_manager,
+                db,
+                download_media=self.download_media,
             )
 
             # 保存论坛和帖子信息
@@ -423,28 +463,84 @@ class ThreadScraper:
             total_pages = posts_page.page.total_page
             self._log(f"帖子 {tid} 共 {total_pages} 页")
 
-            for pn in range(1, total_pages + 1):
+            user_refs: set[tuple[int, Optional[str]]] = set()
+
+            # 先处理第一页
+            first_page_user_refs = await self._process_posts_page(
+                posts_page,
+                tid,
+                1,
+                total_pages,
+                processor,
+                db,
+                asset_manager,
+            )
+            user_refs.update(first_page_user_refs)
+
+            # 剩余页采用生产者-消费者并发拉取
+            if total_pages > 1:
+                coordinator = ProducerConsumerCoordinator(
+                    ProducerConsumerConfig(
+                        producer_count=min(3, total_pages - 1),
+                        consumer_count=1,
+                        queue_size=min(32, max(8, total_pages - 1)),
+                    )
+                )
+                refs_lock = asyncio.Lock()
+
+                async def fetch_page(page_number: int):
+                    if self._stopped:
+                        return None
+
+                    self._log(f"[页 {page_number}/{total_pages}] 正在拉取...")
+                    page = await client.get_posts(
+                        tid,
+                        pn=page_number,
+                        with_comments=True,
+                        only_thread_author=self.only_thread_author,
+                    )
+                    if page is None:
+                        self._log(f"[页 {page_number}/{total_pages}] 获取失败，跳过", "warning")
+                        return None
+                    return page
+
+                async def consume_page(page_number: int, page_data):
+                    page_user_refs = await self._process_posts_page(
+                        page_data,
+                        tid,
+                        page_number,
+                        total_pages,
+                        processor,
+                        db,
+                        asset_manager,
+                    )
+                    async with refs_lock:
+                        user_refs.update(page_user_refs)
+
+                pc_result = await coordinator.run(
+                    page_numbers=range(2, total_pages + 1),
+                    fetch_page=fetch_page,
+                    process_page=consume_page,
+                )
+
+                for err in pc_result.errors:
+                    self._log(f"并发抓取异常: {err}", "warning")
+
+                if pc_result.errors:
+                    return False, f"并发抓取失败: {pc_result.errors[0]}"
+
+                expected_pages = set(range(2, total_pages + 1))
+                processed_pages = set(pc_result.processed_pages)
+                missing_pages = sorted(expected_pages - processed_pages)
+                if missing_pages:
+                    return False, f"并发抓取不完整，缺失页: {missing_pages[:5]}"
+
                 if self._stopped:
                     self._log("收到停止信号，中止爬取", "warning")
                     return False, "用户中止"
 
-                self._log(f"[页 {pn}/{total_pages}] 正在爬取...")
-
-                if pn > 1:
-                    posts_page = await self._client.get_posts(
-                        tid,
-                        pn=pn,
-                        with_comments=True,
-                        only_thread_author=self.only_thread_author,
-                    )
-                    if posts_page is None:
-                        self._log(f"[页 {pn}/{total_pages}] 获取失败，跳过", "warning")
-                        continue
-
-                # 处理这一页的帖子
-                await self._process_posts_page(
-                    posts_page, tid, pn, total_pages, processor, db, asset_manager
-                )
+            # 用户信息完善（对齐 TiebaArchiver）
+            await self._complete_user_info(db, user_refs)
 
             db.commit()
 
@@ -462,7 +558,7 @@ class ThreadScraper:
         processor: ContentProcessor,
         db: ContentDatabase,
         asset_manager: AssetManager,
-    ):
+    ) -> set[tuple[int, Optional[str]]]:
         """
         处理一页帖子
 
@@ -482,6 +578,8 @@ class ThreadScraper:
         posts_list = list(posts_page)
         total_posts = len(posts_list)
 
+        page_user_refs: set[tuple[int, Optional[str]]] = set()
+
         for i, post in enumerate(posts_list, 1):
             reply_num = getattr(post, "reply_num", 0)
             self._log(
@@ -491,6 +589,7 @@ class ThreadScraper:
             # 处理用户
             user = self._aiotieba_user_to_entity(post.user)
             db.insert_user(user)
+            page_user_refs.add((user.id, user.portrait))
 
             # 处理内容
             contents_json = await processor.process_contents(
@@ -517,13 +616,15 @@ class ThreadScraper:
 
             # 处理楼中楼
             if reply_num > 0:
-                await self._process_comments(
+                comment_user_refs = await self._process_comments(
                     tid, post.pid, post.floor, reply_num,
                     thread_author_id, processor, db
                 )
+                page_user_refs.update(comment_user_refs)
 
         db.commit()
         self._log(f"  {page_tag} 完成，共 {total_posts} 条回复")
+        return page_user_refs
 
     async def _process_comments(
         self,
@@ -534,7 +635,7 @@ class ThreadScraper:
         thread_author_id: int,
         processor: ContentProcessor,
         db: ContentDatabase,
-    ):
+    ) -> set[tuple[int, Optional[str]]]:
         """
         处理楼中楼评论（支持分页）
 
@@ -549,8 +650,12 @@ class ThreadScraper:
         """
         pn = 1
         processed_count = 0
+        user_refs: set[tuple[int, Optional[str]]] = set()
 
         while processed_count < reply_num:
+            if self._client is None:
+                break
+
             comments_page = await self._client.get_comments(tid, pid, pn)
             if comments_page is None:
                 logger.warning(f"无法获取楼中楼 [pid={pid}, pn={pn}]")
@@ -564,6 +669,7 @@ class ThreadScraper:
                 # 处理评论用户
                 comment_user = self._aiotieba_user_to_entity(comment.user)
                 db.insert_user(comment_user)
+                user_refs.add((comment_user.id, comment_user.portrait))
 
                 # 处理评论内容
                 comment_contents = await processor.process_contents(
@@ -596,6 +702,8 @@ class ThreadScraper:
                 break
 
             pn += 1
+
+        return user_refs
 
     async def _save_forum_info(self, forum, thread_dir: Path):
         """保存贴吧信息"""
@@ -702,6 +810,117 @@ class ThreadScraper:
             completed=0,
             scrape_time=int(time.time()),
         )
+
+    def _aiotieba_user_info_to_entity(self, user_info) -> UserEntity:
+        """将 aiotieba UserInfo 对象转换为完整 UserEntity。"""
+        gender = getattr(user_info, "gender", 0)
+        if not isinstance(gender, int) and hasattr(gender, "value"):
+            gender = gender.value
+
+        nickname = (
+            getattr(user_info, "nick_name", "")
+            or getattr(user_info, "nick_name_new", "")
+            or getattr(user_info, "nick_name_old", "")
+            or getattr(user_info, "user_name", "")
+            or ""
+        )
+
+        return UserEntity(
+            id=getattr(user_info, "user_id", 0),
+            portrait=getattr(user_info, "portrait", None),
+            username=getattr(user_info, "user_name", None),
+            nickname=nickname,
+            tieba_uid=getattr(user_info, "tieba_uid", None),
+            avatar=None,
+            glevel=getattr(user_info, "glevel", 0),
+            gender=int(gender),
+            ip=getattr(user_info, "ip", ""),
+            is_vip=getattr(user_info, "is_vip", False),
+            is_god=getattr(user_info, "is_god", False),
+            age=getattr(user_info, "age", 0.0),
+            sign=getattr(user_info, "sign", ""),
+            post_num=getattr(user_info, "post_num", 0),
+            agree_num=getattr(user_info, "agree_num", 0),
+            fan_num=getattr(user_info, "fan_num", 0),
+            follow_num=getattr(user_info, "follow_num", 0),
+            forum_num=getattr(user_info, "forum_num", 0),
+            level=0,
+            is_bawu=False,
+            status=int(getattr(user_info, "is_blocked", False)),
+            completed=1,
+            scrape_time=int(time.time()),
+        )
+
+    @staticmethod
+    def _merge_user_entity(base: UserEntity, detail: UserEntity) -> UserEntity:
+        """合并基础用户信息与详情信息。"""
+        return UserEntity(
+            id=base.id,
+            portrait=detail.portrait or base.portrait,
+            username=detail.username or base.username,
+            nickname=detail.nickname or base.nickname,
+            tieba_uid=detail.tieba_uid or base.tieba_uid,
+            avatar=detail.avatar or base.avatar,
+            glevel=detail.glevel or base.glevel,
+            gender=detail.gender if detail.gender != 0 else base.gender,
+            ip=detail.ip or base.ip,
+            is_vip=detail.is_vip or base.is_vip,
+            is_god=detail.is_god or base.is_god,
+            age=detail.age if detail.age != 0 else base.age,
+            sign=detail.sign or base.sign,
+            post_num=detail.post_num or base.post_num,
+            agree_num=detail.agree_num or base.agree_num,
+            fan_num=detail.fan_num or base.fan_num,
+            follow_num=detail.follow_num or base.follow_num,
+            forum_num=detail.forum_num or base.forum_num,
+            level=base.level,
+            is_bawu=base.is_bawu,
+            status=detail.status,
+            completed=1,
+            scrape_time=int(time.time()),
+        )
+
+    async def _complete_user_info(
+        self,
+        db: ContentDatabase,
+        user_refs: set[tuple[int, Optional[str]]],
+    ) -> None:
+        """补全用户详情信息（用户统计等字段）。"""
+        if not user_refs:
+            return
+
+        if self._client is None:
+            return
+
+        client = self._client
+
+        self._log(f"开始完善用户信息，共 {len(user_refs)} 人")
+        completed_count = 0
+
+        for user_id, portrait in sorted(user_refs, key=lambda item: item[0]):
+            if self._stopped:
+                self._log("收到停止信号，中止用户信息完善", "warning")
+                break
+
+            if user_id <= 0 and not portrait:
+                continue
+
+            user_info = await client.get_user_info(user_id, portrait=portrait)
+            if user_info is None or getattr(user_info, "user_id", 0) == 0:
+                continue
+
+            detail = self._aiotieba_user_info_to_entity(user_info)
+            existing = db.get_user(detail.id)
+            if existing is not None:
+                merged = self._merge_user_entity(existing, detail)
+            else:
+                merged = detail
+
+            db.insert_user(merged)
+            completed_count += 1
+
+        db.commit()
+        self._log(f"用户信息完善完成: {completed_count}/{len(user_refs)}")
 
 
 async def scrape_thread(

@@ -147,6 +147,44 @@ class TestTaskManager:
         assert tm.tasks[0].tid == 333
         assert tm.tasks[1].tid == 555
 
+    def test_load_from_json_with_max_tasks_limit(self, tmp_path):
+        """Test loading only first N unique tasks for faster subset crawl."""
+        json_file = tmp_path / "posts.json"
+        json_data = {
+            "posts": [
+                {"tid": 1001, "title": "Post 1", "href": "/p/1001"},
+                {"tid": 1002, "title": "Post 2", "href": "/p/1002"},
+                {"tid": 1003, "title": "Post 3", "href": "/p/1003"},
+                {"tid": 1004, "title": "Post 4", "href": "/p/1004"},
+            ]
+        }
+        json_file.write_text(json.dumps(json_data), encoding="utf-8")
+
+        tm = TaskManager()
+        tm.load_from_json(str(json_file), "output", max_tasks=2)
+
+        assert len(tm.tasks) == 2
+        assert [task.tid for task in tm.tasks] == [1001, 1002]
+
+    def test_load_from_json_max_tasks_applies_after_deduplicate(self, tmp_path):
+        """Test max_tasks counts unique tids instead of raw records."""
+        json_file = tmp_path / "posts.json"
+        json_data = {
+            "posts": [
+                {"tid": 2001, "title": "Post 1", "href": "/p/2001"},
+                {"tid": 2001, "title": "Post 1 dup", "href": "/p/2001"},
+                {"tid": 2002, "title": "Post 2", "href": "/p/2002"},
+                {"tid": 2003, "title": "Post 3", "href": "/p/2003"},
+            ]
+        }
+        json_file.write_text(json.dumps(json_data), encoding="utf-8")
+
+        tm = TaskManager()
+        tm.load_from_json(str(json_file), "output", max_tasks=2)
+
+        assert len(tm.tasks) == 2
+        assert [task.tid for task in tm.tasks] == [2001, 2002]
+
     def test_get_next_task(self):
         """Test getting next pending task"""
         tm = TaskManager()

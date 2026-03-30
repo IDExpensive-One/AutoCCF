@@ -9,6 +9,7 @@ from typing import Callable, Optional, List, Dict, Any
 from ..theme import Colors, Styles, create_card
 from ..state import app_state, ViewName
 from AutoCCF.config import config_manager
+from AutoCCF.utils import is_valid_bduss
 
 
 class StatCard:
@@ -298,9 +299,13 @@ class HomeView:
         try:
             config = config_manager.load()
             has_accounts = config.has_valid_accounts()
+            total_accounts = len(config.accounts)
+            valid_accounts = sum(1 for account in config.accounts if is_valid_bduss(account.bduss))
             db_dir = str(config.get_database_path())
         except Exception:
             has_accounts = False
+            total_accounts = 0
+            valid_accounts = 0
             db_dir = "未配置"
         
         status_items = []
@@ -321,11 +326,11 @@ class HomeView:
         if has_accounts:
             account_icon = ft.Icons.CHECK_CIRCLE
             account_color = Colors.SUCCESS
-            account_text = "已配置"
+            account_text = f"有效 {valid_accounts} / 总计 {total_accounts}"
         else:
             account_icon = ft.Icons.WARNING
             account_color = Colors.WARNING
-            account_text = "未配置 - 需要添加 BDUSS 才能使用 DoPJ"
+            account_text = f"有效 {valid_accounts} / 总计 {total_accounts} - 需要添加可用 BDUSS 才能使用 DoPJ"
         
         status_items.append(
             ft.Row(

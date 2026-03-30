@@ -123,3 +123,10 @@ test-results/
 
 # Windows 下 "> nul" 意外创建的文件
 nul
+
+# upload sanitize
+manual*_run_*/
+gui_manual*_run_*/
+database/
+config.json
+*_posts.json

@@ -75,13 +75,19 @@ class TaskManager:
         self.user_name = ""    # 用户名（从文件名提取）
         self.user_output_dir = ""  # 用户输出目录
 
-    def load_from_json(self, json_path: str, output_dir: str) -> None:
+    def load_from_json(
+        self,
+        json_path: str,
+        output_dir: str,
+        max_tasks: Optional[int] = None,
+    ) -> None:
         """
         从 APoU JSON 文件加载任务
 
         Args:
             json_path: JSON 文件路径
             output_dir: 输出目录（数据库根目录）
+            max_tasks: 最多加载任务数（None 表示不限制）
         """
         self.source_file = os.path.basename(json_path)
         parent_dir = os.path.dirname(json_path)
@@ -119,6 +125,9 @@ class TaskManager:
         for post in posts:
             tid = self._extract_tid(post)
             if tid and tid not in seen_tids:
+                if max_tasks is not None and max_tasks > 0 and task_index >= max_tasks:
+                    break
+
                 seen_tids.add(tid)
                 task_index += 1
                 # 每个帖子独立的 TiebaReader 兼容存档目录
@@ -441,14 +450,23 @@ class DoPJRunner:
         self.start_time: float = 0.0
         self._lock = threading.Lock()
 
-    def load_tasks(self, incremental: bool = True) -> None:
+    def load_tasks(
+        self,
+        incremental: bool = True,
+        max_tasks: Optional[int] = None,
+    ) -> None:
         """
         加载任务
         
         Args:
             incremental: 是否启用增量模式（跳过已存档的帖子）
+            max_tasks: 最多加载任务数（None 表示不限制）
         """
-        self.task_manager.load_from_json(self.input_json, self.output_dir)
+        self.task_manager.load_from_json(
+            self.input_json,
+            self.output_dir,
+            max_tasks=max_tasks,
+        )
         
         # 更新 progress_file 路径到用户目录
         self.task_manager.progress_file = os.path.join(
@@ -671,6 +689,7 @@ def main():
     parser.add_argument("-t", "--threads", type=int, default=3, help="并发线程数（默认: 3）")
     parser.add_argument("-r", "--retries", type=int, default=3, help="最大重试次数（默认: 3）")
     parser.add_argument("-p", "--progress", default=None, help="进度文件（默认: <输出目录>/progress.json）")
+    parser.add_argument("--max-posts", type=int, default=0, help="最多处理帖子数（0 表示不限制）")
 
     args = parser.parse_args()
     
@@ -693,6 +712,7 @@ def main():
         ("输出目录", args.output),
         ("并发线程", str(args.threads)),
         ("最大重试", str(args.retries)),
+        ("最多帖子", str(args.max_posts) if args.max_posts > 0 else "不限制"),
     ])
 
     runner: Optional[DoPJRunner] = None
@@ -720,7 +740,7 @@ def main():
             cli=cli,
         )
 
-        runner.load_tasks()
+        runner.load_tasks(max_tasks=args.max_posts if args.max_posts > 0 else None)
         runner.run()
 
     except ValueError as e:

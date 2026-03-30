@@ -3,7 +3,7 @@ tb.anova.me 回退 API 客户端
 当 aiotieba 因用户隐私保护返回 0 条结果时，使用此客户端作为回退。
 
 API 契约（实测确认）:
-  GET https://tb.anova.me/getPostsNew?username={username}&page={N}
+  GET https://tb.anova.me/getPostsNew?fname=&username={username}&page={N}
   成功: {"msg": "Success.", "posts": [...], "user": {...}, "hasNext": 1}
   空结果: {"msg": "没有查询到回复."}
   每页约 12-20 条
@@ -28,7 +28,8 @@ class AnovaAPIClient:
 
     async def __aenter__(self) -> "AnovaAPIClient":
         timeout = aiohttp.ClientTimeout(total=self.config.anova_request_timeout)
-        self._session = aiohttp.ClientSession(timeout=timeout)
+        headers = {"Accept-Encoding": "gzip, deflate"}
+        self._session = aiohttp.ClientSession(timeout=timeout, headers=headers)
         return self
 
     async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
@@ -57,7 +58,7 @@ class AnovaAPIClient:
         if self._session is None:
             raise RuntimeError("AnovaAPIClient 未初始化，请使用 async with 上下文管理器")
 
-        params = {"username": username, "page": str(page)}
+        params = {"fname": "", "username": username, "page": str(page)}
 
         for attempt in range(1, self.config.anova_max_retries + 1):
             try:

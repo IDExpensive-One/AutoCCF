@@ -26,7 +26,7 @@ DEFAULT_CONFIG_PATH = "./config.json"
 @dataclass
 class APoUConfig:
     """APoU 模块配置"""
-    page_delay: float = 2.0
+    page_delay: float = 1.0
     max_retries: int = 3
 
     def __post_init__(self) -> None:
@@ -40,7 +40,7 @@ class APoUConfig:
 @dataclass
 class DoPJConfig:
     """DoPJ 模块配置"""
-    threads: int = 3
+    threads: int = 2
     max_retries: int = 3
     min_interval: float = 2.0
     max_fails: int = 5
@@ -110,13 +110,13 @@ class UnifiedConfig:
         
         apou_data = data.get("apou", {})
         apou = APoUConfig(
-            page_delay=apou_data.get("page_delay", 2.0),
+            page_delay=apou_data.get("page_delay", 1.0),
             max_retries=apou_data.get("max_retries", 3),
         )
         
         dopj_data = data.get("dopj", {})
         dopj = DoPJConfig(
-            threads=dopj_data.get("threads", 3),
+            threads=dopj_data.get("threads", 2),
             max_retries=dopj_data.get("max_retries", 3),
             min_interval=dopj_data.get("min_interval", 2.0),
             max_fails=dopj_data.get("max_fails", 5),
@@ -230,7 +230,7 @@ class ConfigManager:
         # 2. 询问 BDUSS
         print()
         print(f"  {Colors.GRAY}APoU 和 DoPJ 都需要贴吧账户的 BDUSS 来获取数据。{Colors.RESET}")
-        print(f"  {Colors.GRAY}获取方法: 浏览器 F12 → Application → Cookies → BDUSS{Colors.RESET}")
+        print(f"  {Colors.GRAY}获取方法: 在百度贴吧任意界面按 F12 → Application → Cookies → tieba.baidu.com → BDUSS{Colors.RESET}")
         print()
         
         accounts = []

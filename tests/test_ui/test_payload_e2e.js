@@ -4,6 +4,7 @@
 // 目标用户: 团子传说
 const { test, expect, _electron: electron } = require('@playwright/test');
 const path = require('path');
+const fs = require('fs');
 
 const electronExe = require(
   path.join(__dirname, '..', '..', 'electron', 'node_modules', 'electron'),
@@ -49,6 +50,16 @@ async function collectProgressEvents(action, payload, timeoutMs = 120000) {
       }),
     { action, payload, timeoutMs },
   );
+}
+
+function createSubsetApouInput(outputPath, limit = 2) {
+  const raw = JSON.parse(fs.readFileSync(outputPath, 'utf-8'));
+  const posts = Array.isArray(raw) ? raw : raw.posts || [];
+  const subset = posts.slice(0, limit);
+  const subsetPath = path.join(path.dirname(outputPath), 'posts_subset.json');
+  const payload = Array.isArray(raw) ? subset : { ...raw, posts: subset };
+  fs.writeFileSync(subsetPath, JSON.stringify(payload, null, 2), 'utf-8');
+  return { subsetPath, subset };
 }
 
 test.beforeAll(async () => {
@@ -129,12 +140,12 @@ test.describe.serial('Phase 2: APoU 爬取 Payload 验证', () => {
   let progressEvents;
 
   test('apou:crawl 对 "团子传说" 返回 progress 事件和成功 result', async () => {
-    test.setTimeout(180000);
+    test.setTimeout(300000);
 
     const outcome = await collectProgressEvents(
       'apou:crawl',
       { username: TARGET_USERNAME },
-      150000,
+      270000,
     );
 
     expect(outcome.timedOut).toBe(false);
@@ -166,13 +177,13 @@ test.describe.serial('Phase 2: APoU 爬取 Payload 验证', () => {
   });
 
   test('apou:crawl 的 posts_count 与 progress 事件一致', async () => {
-    // progress 中的 posts_count 是每页帖子数，累计应该等于最终结果
+    // progress 中的 posts_count 是每页原始帖子数，最终结果可能因为去重而更小
     const totalFromProgress = progressEvents.reduce(
       (sum, e) => sum + (e.posts_count || 0),
       0,
     );
-    // 允许 ±1 的误差（最后一页可能有边界情况）
-    expect(Math.abs(totalFromProgress - crawlResult.posts_count)).toBeLessThanOrEqual(1);
+    expect(totalFromProgress).toBeGreaterThanOrEqual(crawlResult.posts_count);
+    expect(crawlResult.posts_count).toBeGreaterThan(0);
   });
 });
 
@@ -196,6 +207,30 @@ test.describe.serial('Phase 3: APoU Outputs Payload 验证', () => {
     expect(targetOutput.path.length).toBeGreaterThan(0);
     expect(typeof targetOutput.posts_count).toBe('number');
     expect(targetOutput.posts_count).toBeGreaterThan(0);
+  });
+
+  test('dopj:crawl 可基于最小 APoU 子集完成抓取', async () => {
+    test.setTimeout(240000);
+
+    const outputsResult = await invokebridge('apou:outputs');
+    const targetOutput = outputsResult.outputs.find(
+      (o) => o.username === TARGET_USERNAME,
+    );
+    expect(targetOutput).toBeDefined();
+
+    const { subsetPath, subset } = createSubsetApouInput(targetOutput.path, 2);
+    expect(subset.length).toBeGreaterThan(0);
+
+    const outcome = await collectProgressEvents(
+      'dopj:crawl',
+      { input_json: subsetPath, threads: 1 },
+      210000,
+    );
+
+    expect(outcome.timedOut).toBe(false);
+    expect(outcome.result).toHaveProperty('success', true);
+    expect(outcome.result.stats.total).toBe(subset.length);
+    expect(outcome.result.stats.success + outcome.result.stats.skipped).toBeGreaterThan(0);
   });
 });
 

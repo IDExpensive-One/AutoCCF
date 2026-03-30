@@ -94,6 +94,9 @@ test.describe.serial('Phase 2: Settings View - Config Load & Account Management'
     await expect(page.locator('[data-database-dir]')).toHaveAttribute('readonly');
     await expect(page.locator('[data-account-body]')).toBeVisible({ timeout: 5000 });
     await expect(page.locator('[data-save-settings]')).toBeEnabled({ timeout: 5000 });
+    await expect(page.locator('[data-bduss-valid-count]')).toBeVisible({ timeout: 5000 });
+    await expect(page.locator('[data-bduss-total-count]')).toBeVisible({ timeout: 5000 });
+    await expect(page.locator('[data-bduss-help]')).toContainText('百度贴吧任意界面按 F12', { timeout: 5000 });
     await expect(page.locator('[data-apou-page-delay]')).toBeVisible();
     await expect(page.locator('[data-apou-max-retries]')).toBeVisible();
     await expect(page.locator('[data-dopj-threads]')).toBeVisible();
@@ -111,12 +114,29 @@ test.describe.serial('Phase 2: Settings View - Config Load & Account Management'
     const currentAccountRows = page.locator('[data-account-body] tr');
     await expect(currentAccountRows.first()).toBeVisible({ timeout: 5000 });
 
-    await page.evaluate(() => {
+    const originalDelay = await page.locator('[data-apou-page-delay]').inputValue();
+    const nextDelay = originalDelay === '3' ? '2.5' : '3';
+
+    await page.evaluate((value) => {
       const range = document.querySelector('[data-apou-page-delay]');
-      range.value = '3';
+      range.value = value;
       range.dispatchEvent(new Event('input', { bubbles: true }));
+    }, nextDelay);
+    await expect(page.locator('[data-apou-page-delay-value]')).toHaveText(Number(nextDelay).toFixed(1), { timeout: 5000 });
+    await expect(page.locator('[data-status]')).toContainText('已自动保存', { timeout: 5000 });
+
+    const savedDelay = await page.evaluate(async () => {
+      const result = await window.api.invoke('config:load');
+      return result.config.apou.page_delay;
     });
-    await expect(page.locator('[data-apou-page-delay-value]')).toHaveText('3.0', { timeout: 5000 });
+    expect(savedDelay).toBe(Number(nextDelay));
+
+    await page.evaluate((value) => {
+      const range = document.querySelector('[data-apou-page-delay]');
+      range.value = value;
+      range.dispatchEvent(new Event('input', { bubbles: true }));
+    }, originalDelay);
+    await expect(page.locator('[data-status]')).toContainText('已自动保存', { timeout: 5000 });
 
     await page.click('[data-account-add]');
     await expect(page.locator('[data-account-name-input]')).toBeVisible({ timeout: 5000 });

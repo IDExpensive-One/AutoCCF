@@ -5,7 +5,7 @@
 使用包装类模式（Wrapper Class Pattern）以兼容新版 Flet API。
 """
 import flet as ft
-from typing import Callable, Optional, List, Dict, Any
+from typing import Callable, Optional, List
 from pathlib import Path
 from ..theme import Colors, Styles, create_card
 from ..components.forms import BDUSSInput, ConfigSlider, ActionButton
@@ -18,7 +18,7 @@ class AccountEditor:
     
     def __init__(
         self,
-        accounts: List[Account] = None,
+        accounts: Optional[List[Account]] = None,
         on_change: Optional[Callable[[List[Account]], None]] = None,
     ):
         self._accounts = accounts or []
@@ -27,6 +27,8 @@ class AccountEditor:
         self._build()
     
     def _build(self):
+        valid_count = sum(1 for account in self._accounts if is_valid_bduss(account.bduss))
+
         self._accounts_column = ft.Column(
             controls=self._build_account_rows(),
             spacing=8,
@@ -42,6 +44,11 @@ class AccountEditor:
                             weight=ft.FontWeight.W_500,
                             color=Colors.TEXT_PRIMARY,
                         ),
+                        ft.Text(
+                            f"有效 {valid_count} / 总计 {len(self._accounts)}",
+                            size=12,
+                            color=Colors.TEXT_SECONDARY,
+                        ),
                         ft.Container(expand=True),
                         ft.IconButton(
                             icon=ft.Icons.ADD,
@@ -54,7 +61,7 @@ class AccountEditor:
                 ft.Divider(height=1, color=Colors.DIVIDER),
                 self._accounts_column,
                 ft.Text(
-                    "BDUSS 获取方法: 浏览器 F12 → Application → Cookies → BDUSS",
+                    "BDUSS 获取方法: 在百度贴吧任意界面按 F12 → Application → Cookies → tieba.baidu.com → BDUSS",
                     size=12,
                     color=Colors.TEXT_DISABLED,
                 ),
@@ -75,6 +82,12 @@ class AccountEditor:
                             ft.Icons.CHECK_CIRCLE if is_valid else ft.Icons.ERROR,
                             size=20,
                             color=Colors.SUCCESS if is_valid else Colors.WARNING,
+                        ),
+                        ft.Text(
+                            "可用" if is_valid else "无效",
+                            size=12,
+                            color=Colors.SUCCESS if is_valid else Colors.WARNING,
+                            width=40,
                         ),
                         ft.TextField(
                             value=account.name,
@@ -158,7 +171,8 @@ class AccountEditor:
     def _refresh(self):
         """刷新列表"""
         self._accounts_column.controls = self._build_account_rows()
-        self._control.update()
+        if self._control is not None:
+            self._control.update()
     
     def _notify_change(self):
         """通知变更"""
@@ -185,6 +199,7 @@ class SettingsView:
     def __init__(self):
         self._config: Optional[UnifiedConfig] = None
         self._modified = False
+        self._is_auto_saving = False
         self._control: Optional[ft.Container] = None
         self._build()
     
@@ -369,10 +384,12 @@ class SettingsView:
     
     def _on_db_dir_change(self, e):
         """数据目录变更"""
+        assert self._config is not None
         value = e.control.value.strip()
         # 保存绝对路径
         self._config.database_dir = str(Path(value).resolve()) if value else value
         self._set_modified(True)
+        self._auto_save_config()
 
     def _browse_folder(self, _):
         """浏览文件夹（使用系统原生对话框）"""
@@ -397,6 +414,7 @@ class SettingsView:
                     self._db_dir_field.update()
                     self._config.database_dir = abs_path
                     self._set_modified(True)
+                    self._auto_save_config()
             except Exception:
                 pass
 
@@ -405,11 +423,14 @@ class SettingsView:
     
     def _on_accounts_change(self, accounts: List[Account]):
         """账户变更"""
+        assert self._config is not None
         self._config.accounts = accounts
         self._set_modified(True)
+        self._auto_save_config()
     
     def _on_config_change(self, key: str, value: float):
         """配置变更"""
+        assert self._config is not None
         if key == "apou_delay":
             self._config.apou.page_delay = value
         elif key == "apou_retries":
@@ -420,6 +441,7 @@ class SettingsView:
             self._config.dopj.min_interval = value
         
         self._set_modified(True)
+        self._auto_save_config()
     
     def _set_modified(self, modified: bool):
         """设置修改状态"""
@@ -436,14 +458,7 @@ class SettingsView:
         """保存配置"""
         try:
             self._save_button.set_loading(True)
-            
-            # 保存配置
-            config_path = self._config.save()
-            
-            self._set_modified(False)
-            self._status_text.value = f"已保存到 {config_path}"
-            self._status_text.color = Colors.SUCCESS
-            self._status_text.update()
+            self._persist_config("已保存到")
             
         except Exception as e:
             self._status_text.value = f"保存失败: {str(e)}"
@@ -451,6 +466,31 @@ class SettingsView:
             self._status_text.update()
         finally:
             self._save_button.set_loading(False)
+
+    def _auto_save_config(self):
+        """实时自动保存配置。"""
+        if self._is_auto_saving:
+            return
+
+        self._is_auto_saving = True
+        try:
+            self._persist_config("已自动保存到")
+        except Exception as e:
+            self._status_text.value = f"自动保存失败: {str(e)}"
+            self._status_text.color = Colors.ERROR
+            self._status_text.update()
+        finally:
+            self._is_auto_saving = False
+
+    def _persist_config(self, status_prefix: str):
+        """执行配置持久化。"""
+        assert self._config is not None
+        config_path = self._config.save()
+
+        self._set_modified(False)
+        self._status_text.value = f"{status_prefix} {config_path}"
+        self._status_text.color = Colors.SUCCESS
+        self._status_text.update()
     
     @property
     def control(self) -> ft.Container:

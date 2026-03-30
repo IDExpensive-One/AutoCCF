@@ -11,6 +11,9 @@ let isLoading = false;
 let isSaving = false;
 let clickHandler = null;
 let inputHandler = null;
+let autosaveTimer = null;
+
+const AUTOSAVE_DELAY_MS = 600;
 
 function createDefaultConfig() {
   return {
@@ -18,11 +21,11 @@ function createDefaultConfig() {
     output_dir: "./database",
     accounts: [],
     apou: {
-      page_delay: 2.0,
+      page_delay: 1.0,
       max_retries: 3,
     },
     dopj: {
-      threads: 3,
+      threads: 2,
       max_retries: 3,
       min_interval: 2.0,
       max_fails: 5,
@@ -75,6 +78,32 @@ function previewBduss(bduss) {
   return normalized ? `${normalized.slice(0, 6)}...` : "未填写";
 }
 
+function isValidBduss(bduss) {
+  const normalized = String(bduss || "").trim();
+  return normalized.length > 50
+    && !normalized.startsWith("你的")
+    && !normalized.startsWith("请填入")
+    && !normalized.startsWith("your_");
+}
+
+function getAccountSummary() {
+  const total = currentConfig.accounts.length;
+  const valid = currentConfig.accounts.filter((account) => isValidBduss(account.bduss)).length;
+  return {
+    total,
+    valid,
+    invalid: total - valid,
+  };
+}
+
+function getComparableConfig(config) {
+  return JSON.stringify(normalizeConfig(config));
+}
+
+function hasUnsavedChanges() {
+  return getComparableConfig(currentConfig) !== getComparableConfig(lastLoadedConfig);
+}
+
 function renderStatusBadge() {
   if (!statusState.message) {
     return "";
@@ -89,6 +118,10 @@ function renderAccountRows() {
 
   currentConfig.accounts.forEach((account, index) => {
     const isEditing = draftAccount?.mode === "edit" && draftAccount.index === index;
+    const isValid = isValidBduss(account.bduss);
+    const statusBadge = isValid
+      ? '<span class="badge badge-success">可用</span>'
+      : '<span class="badge badge-error">无效</span>';
 
     if (isEditing) {
       rows.push(`
@@ -113,6 +146,7 @@ function renderAccountRows() {
               autocomplete="off"
             >
           </td>
+          <td><span class="badge">编辑中</span></td>
           <td>
             <button class="btn btn-primary btn-sm" type="button" data-account-confirm>确认</button>
             <button class="btn btn-secondary btn-sm" type="button" data-account-cancel>取消</button>
@@ -126,6 +160,7 @@ function renderAccountRows() {
       <tr>
         <td>${escapeHtml(account.name)}</td>
         <td>${escapeHtml(previewBduss(account.bduss))}</td>
+        <td>${statusBadge}</td>
         <td>
           <button class="btn btn-secondary btn-sm" type="button" data-account-edit="${index}">编辑</button>
           <button class="btn btn-danger btn-sm" type="button" data-account-delete="${index}">删除</button>
@@ -137,7 +172,7 @@ function renderAccountRows() {
   if (currentConfig.accounts.length === 0) {
     rows.push(`
       <tr>
-        <td colspan="3">暂无账户，请先添加。</td>
+        <td colspan="4">暂无账户，请先添加。</td>
       </tr>
     `);
   }
@@ -162,13 +197,14 @@ function renderAccountRows() {
             data-account-bduss-input
             value="${escapeHtml(draftAccount.bduss)}"
             placeholder="输入 BDUSS"
-            autocomplete="off"
-          >
-        </td>
-        <td>
-          <button class="btn btn-primary btn-sm" type="button" data-account-confirm>确认</button>
-          <button class="btn btn-secondary btn-sm" type="button" data-account-cancel>取消</button>
-        </td>
+              autocomplete="off"
+            >
+          </td>
+          <td><span class="badge">新增中</span></td>
+          <td>
+            <button class="btn btn-primary btn-sm" type="button" data-account-confirm>确认</button>
+            <button class="btn btn-secondary btn-sm" type="button" data-account-cancel>取消</button>
+          </td>
       </tr>
     `);
   }
@@ -195,6 +231,8 @@ function syncCurrentElements(container) {
 }
 
 function renderView(container) {
+  const accountSummary = getAccountSummary();
+
   container.innerHTML = `
     <div style="display: grid; gap: var(--space-lg);">
       <div class="card">
@@ -208,11 +246,16 @@ function renderView(container) {
 
       <div class="card">
         <h3 class="card-title">账户管理</h3>
+        <div style="display: flex; gap: var(--space-sm); align-items: center; margin-bottom: var(--space-md);">
+          <span class="badge badge-success" data-bduss-valid-count>有效 ${accountSummary.valid}</span>
+          <span class="badge ${accountSummary.invalid > 0 ? "badge-error" : "badge-success"}" data-bduss-total-count>总计 ${accountSummary.total}</span>
+        </div>
         <table class="table">
           <thead>
             <tr>
               <th>名称</th>
               <th>BDUSS 预览</th>
+              <th>状态</th>
               <th>操作</th>
             </tr>
           </thead>
@@ -220,6 +263,9 @@ function renderView(container) {
             ${renderAccountRows()}
           </tbody>
         </table>
+        <p style="margin: var(--space-md) 0; color: var(--color-text-secondary);" data-bduss-help>
+          BDUSS 获取方法：在百度贴吧任意界面按 F12 → Application → Cookies → tieba.baidu.com → BDUSS
+        </p>
         <button class="btn btn-secondary" type="button" data-account-add ${draftAccount ? "disabled" : ""}>添加账户</button>
       </div>
 
@@ -325,6 +371,29 @@ function getSavePayload() {
   };
 }
 
+function clearAutosaveTimer() {
+  if (autosaveTimer) {
+    clearTimeout(autosaveTimer);
+    autosaveTimer = null;
+  }
+}
+
+function scheduleAutosave() {
+  if (draftAccount || isLoading) {
+    return;
+  }
+
+  clearAutosaveTimer();
+  if (!hasUnsavedChanges()) {
+    return;
+  }
+
+  autosaveTimer = setTimeout(() => {
+    autosaveTimer = null;
+    void persistConfig({ auto: true });
+  }, AUTOSAVE_DELAY_MS);
+}
+
 function beginDraft(mode, index = null) {
   if (mode === "edit" && index !== null) {
     const account = currentConfig.accounts[index];
@@ -375,6 +444,7 @@ function confirmDraft() {
     setStatus("", "");
     draftAccount = null;
     rerender();
+    scheduleAutosave();
     return;
   }
 
@@ -382,6 +452,7 @@ function confirmDraft() {
   setStatus("", "");
   draftAccount = null;
   rerender();
+  scheduleAutosave();
 }
 
 async function loadConfig() {
@@ -400,6 +471,7 @@ async function loadConfig() {
     const normalized = normalizeConfig(result?.config);
     currentConfig = normalized;
     lastLoadedConfig = cloneConfig(normalized);
+    clearAutosaveTimer();
     setStatus("", "");
   } catch (error) {
     if (requestId !== currentRequestId || !currentContainer) {
@@ -418,6 +490,10 @@ async function loadConfig() {
 }
 
 async function saveConfig() {
+  await persistConfig({ auto: false });
+}
+
+async function persistConfig({ auto }) {
   if (isLoading || isSaving) {
     return;
   }
@@ -429,7 +505,9 @@ async function saveConfig() {
 
   const requestId = ++currentRequestId;
   isSaving = true;
-  setStatus("", "");
+  if (!auto) {
+    setStatus("", "");
+  }
   rerender();
 
   try {
@@ -438,14 +516,14 @@ async function saveConfig() {
       return;
     }
 
-    lastLoadedConfig = cloneConfig(currentConfig);
-    setStatus("success", "设置已保存");
+    lastLoadedConfig = normalizeConfig(getSavePayload());
+    setStatus("success", auto ? "已自动保存" : "设置已保存");
   } catch (error) {
     if (requestId !== currentRequestId || !currentContainer) {
       return;
     }
 
-    setStatus("error", error?.message || "保存设置失败");
+    setStatus("error", error?.message || (auto ? "自动保存失败" : "保存设置失败"));
   } finally {
     if (requestId !== currentRequestId || !currentContainer) {
       return;
@@ -473,6 +551,8 @@ async function handleSelectDirectory() {
     if (currentElements?.databaseDirInput) {
       currentElements.databaseDirInput.value = selectedDirectory;
     }
+
+    scheduleAutosave();
   } catch (error) {
     if (!currentContainer) {
       return;
@@ -494,6 +574,7 @@ function handleDeleteAccount(index) {
   }
   setStatus("", "");
   rerender();
+  scheduleAutosave();
 }
 
 function handleContainerClick(event) {
@@ -540,6 +621,7 @@ function handleContainerClick(event) {
   if (target.hasAttribute("data-reset-settings")) {
     currentConfig = cloneConfig(lastLoadedConfig);
     draftAccount = null;
+    clearAutosaveTimer();
     setStatus("", "");
     void loadConfig();
   }
@@ -565,36 +647,42 @@ function handleContainerInput(event) {
   if (target.matches("[data-apou-page-delay]")) {
     currentConfig.apou.page_delay = Number(target.value);
     updateSliderLabel("apouPageDelay", currentConfig.apou.page_delay.toFixed(1));
+    scheduleAutosave();
     return;
   }
 
   if (target.matches("[data-apou-max-retries]")) {
     currentConfig.apou.max_retries = Number(target.value);
     updateSliderLabel("apouMaxRetries", String(currentConfig.apou.max_retries));
+    scheduleAutosave();
     return;
   }
 
   if (target.matches("[data-dopj-threads]")) {
     currentConfig.dopj.threads = Number(target.value);
     updateSliderLabel("dopjThreads", String(currentConfig.dopj.threads));
+    scheduleAutosave();
     return;
   }
 
   if (target.matches("[data-dopj-max-retries]")) {
     currentConfig.dopj.max_retries = Number(target.value);
     updateSliderLabel("dopjMaxRetries", String(currentConfig.dopj.max_retries));
+    scheduleAutosave();
     return;
   }
 
   if (target.matches("[data-dopj-min-interval]")) {
     currentConfig.dopj.min_interval = Number(target.value);
     updateSliderLabel("dopjMinInterval", currentConfig.dopj.min_interval.toFixed(1));
+    scheduleAutosave();
     return;
   }
 
   if (target.matches("[data-dopj-max-fails]")) {
     currentConfig.dopj.max_fails = Number(target.value);
     updateSliderLabel("dopjMaxFails", String(currentConfig.dopj.max_fails));
+    scheduleAutosave();
   }
 }
 
@@ -607,6 +695,7 @@ export async function mount(container, params = {}) {
   statusState = { type: "", message: "" };
   isLoading = false;
   isSaving = false;
+  clearAutosaveTimer();
 
   renderView(container);
 
@@ -625,6 +714,7 @@ export async function mount(container, params = {}) {
 
 export function unmount() {
   currentRequestId += 1;
+  clearAutosaveTimer();
 
   if (currentContainer && clickHandler) {
     currentContainer.removeEventListener("click", clickHandler);
