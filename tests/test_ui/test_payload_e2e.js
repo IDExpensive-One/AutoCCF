@@ -360,7 +360,7 @@ test.describe.serial('Phase 6: GUI 驱动的全流程 Payload 核验', () => {
 
     // 等待配置加载完成（账户行出现 BDUSS 掩码 "..." 表示已加载真实配置）
     const accountBody = page.locator('[data-account-body]');
-    await expect(accountBody.locator('tr', { hasText: '...' })).toBeVisible({ timeout: 15000 });
+    await expect(accountBody.locator('tr', { hasText: '...' }).first()).toBeVisible({ timeout: 15000 });
 
     // database_dir 不为空
     const dbDir = await page.locator('[data-database-dir]').inputValue();
