@@ -61,36 +61,6 @@ Recommended operating principles:
 5. Establish a deletion timeline for intermediate files and archived outputs.  
    为中间文件和归档输出建立明确的删除周期。
 
-## Credential Security / 凭证安全
-
-`BDUSS` is a high-risk credential and must be treated as a secret.  
-`BDUSS` 属于高风险凭证，必须按密钥级别进行保护。
-
-Security requirements:  
-安全要求：
-
-1. Never commit, publish, or paste a real `BDUSS` into issue trackers, chat logs, or screenshots.  
-   不要在 issue、聊天记录、截图或代码仓库中提交、公开或粘贴真实 `BDUSS`。
-2. Use dedicated accounts for testing whenever possible.  
-   在可能的情况下使用专用测试账号。
-3. Rotate or revoke credentials immediately after suspected exposure.  
-   一旦怀疑泄露，应立即轮换或吊销凭证。
-4. Store credentials only in local configuration files or approved secret stores.  
-   仅在本地配置文件或受控密钥管理系统中保存凭证。
-
-## Files That Must Not Be Committed / 严禁提交的文件
-
-The following files must never be committed to the repository:  
-以下文件严禁提交到仓库：
-
-- `DoPJ/config/config.json`
-- `**/bduss.txt`
-- `**/tieba_auth.json`
-- `*_posts.json` except sanitized examples
-- Raw archive outputs under `database/`, `posts/`, or similar runtime directories
-
-Repository maintainers should verify this before every push or PR.  
-维护者应在每次推送或提交 PR 前对此进行检查。
 
 ## Architecture / 架构说明
 
@@ -115,8 +85,8 @@ AutoCCF/
 - 中文：读取 APoU 输出，在重试与并发控制下进一步抓取帖子详情内容。
 
 ### Electron GUI / 桌面界面
-- English: Provides a GUI wrapper around the project workflow for local operation.
-- 中文：为本地使用提供图形界面封装。
+- English: Provides a Element GUI wrapper around the project workflow for local operation.
+- 中文：为本地使用提供基于Element的图形界面封装。
 
 ## Quick Start / 快速开始
 
@@ -126,13 +96,6 @@ AutoCCF/
 - A working network connection to required upstream services
 - Optional: Node.js and npm for the Electron GUI
 
-### Python Environment / Python 环境准备
-
-```bash
-python -m venv venv
-venv\Scripts\activate
-pip install -r requirements.txt
-```
 
 ### Stage 1: Run APoU / 运行 APoU
 
