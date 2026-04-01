@@ -85,8 +85,6 @@ check_required_file ".gitignore" ".gitignore"
 check_required_file "LICENSE" "LICENSE"
 check_required_file "README.md" "README.md"
 check_required_file "requirements.txt" "requirements.txt"
-check_required_file "CLAUDE.md" "CLAUDE.md"
-check_required_file "CONTRIBUTING.md" "CONTRIBUTING.md"
 check_required_file "CHANGELOG.md" "CHANGELOG.md"
 
 echo ""

@@ -205,24 +205,11 @@ python -c "from utils.url_parser import parse_tieba_url; print(parse_tieba_url('
 npx playwright test tests/test_ui/test_payload_e2e.js -g "Phase 2: APoU"
 ```
 
-## Collaboration and Review / 协作与审查
+## Project Docs / 项目文档
 
-For contribution and review standards, see the following documents:  
-关于贡献和审查规范，请参考以下文档：
-
-- [CONTRIBUTING.md](CONTRIBUTING.md)
-- [PRE_UPLOAD_CHECKLIST.md](PRE_UPLOAD_CHECKLIST.md)
+- [DoPJ/README.md](DoPJ/README.md)
 - [CHANGELOG.md](CHANGELOG.md)
-
-Recommended pull request expectations:  
-建议的 Pull Request 要求：
-
-1. State scope clearly.  
-   明确说明变更范围。
-2. List validation commands actually executed.  
-   列出实际执行过的验证命令。
-3. Confirm no secrets or runtime data were included.  
-   确认未包含密钥或运行时数据。
+- [DEPLOYMENT.md](DEPLOYMENT.md)
 
 ## Known Limitations / 已知限制
 
@@ -237,6 +224,19 @@ Recommended pull request expectations:
 
 This project is licensed under the [MIT License](LICENSE).  
 本项目采用 [MIT License](LICENSE) 许可协议。
+
+## Acknowledgements and Citation / 鸣谢与引用
+
+This project references and builds on the ideas or implementations of the following repositories and services:  
+本项目在设计和实现上参考了以下仓库或服务：
+
+- [tb.anova.me](https://tb.anova.me) - API source used by APoU.
+- [TiebaArchiver / TiebaScraper](https://github.com/Sorceresssis/TiebaScraper) - referenced by DoPJ historical implementation.
+- [aiotieba](https://github.com/Starry-OvO/aiotieba) - async Tieba API library used by this project.
+- [TiebaReader](https://github.com/Sorceresssis/TiebaReader) - companion reader tool for archived data.
+
+If AutoCCF helps your work, please also cite or star the upstream projects above.  
+如果 AutoCCF 对你有帮助，也欢迎为上述上游项目引用或点亮 Star。
 
 ## Final Notice / 最终提示
 
